@@ -22,6 +22,7 @@ use core::cell::Cell;
 use core::cell::RefCell;
 use core::cell::UnsafeCell;
 use core::sync::atomic::AtomicU32;
+use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 use core::{
     fmt::write,
@@ -42,6 +43,7 @@ pub mod usb;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    defmt::error!("{}", info);
     modify_bootloader_info(|inf| {
         let panic = AppPanicInfo::new(info);
         inf.app_panic = Some(panic);
@@ -64,6 +66,7 @@ mod app {
     };
 
     use crate::{
+        can::{egs52::Egs52Can, CanLayerTy},
         diag::KwpServer,
         sensors::{AdcData, AdcPins},
         usb::UsbData,
@@ -71,6 +74,7 @@ mod app {
     use atsamd_hal::{
         can::Dependencies,
         clock::v2::{pclk, types::Can0},
+        ehal::digital::OutputPin,
         fugit::HertzU32,
         serial_number,
         usb::{
@@ -131,8 +135,8 @@ mod app {
     struct Shared {
         #[lock_free]
         usb_data: UsbData<'static>,
-        cpu_ticks: u32,
         wdt: Watchdog,
+        can_layer: CanLayerTy,
     }
 
     #[init(local = [
@@ -161,6 +165,7 @@ mod app {
         // Steal PAC controller (We need mclk later)
         let (_, _, _, mut mclk) = unsafe { clocks.pac.steal() };
 
+        // Enable watchdog alarm
         let mut wdt = Watchdog::new(device.wdt);
         wdt.feed();
 
@@ -235,6 +240,7 @@ mod app {
         core.SYST.set_reload(0xFF_FFFF);
         core.SYST.clear_current();
         core.SYST.enable_counter();
+        core.SYST.enable_interrupt();
 
         // Init ADCs
         let (pclk_adc0, gclk3_80) = Pclk::enable(tokens.pclks.adc0, gclk3_80);
@@ -260,6 +266,13 @@ mod app {
             pclk_adc0,
             pclk_adc1,
         );
+
+        // TEST
+        pins.sensor_pwr_en
+            .into_push_pull_output()
+            .set_high()
+            .unwrap();
+        pins.sol_pwr_en.into_push_pull_output().set_high().unwrap();
 
         // -- CAN init --
         let (clk_can, gclk2_40) = Pclk::enable(tokens.pclks.can0, gclk2_40);
@@ -341,14 +354,17 @@ mod app {
             isotp: isotp_usb_tx,
         };
 
-        async_init::spawn().unwrap();
+        let can_layer = CanLayerTy::Egs52(Egs52Can::new());
+
+        async_init::spawn(arbiter_cantx).unwrap_or_else(|_| panic!("Could not start async init"));
         cpu_monitor::spawn().unwrap();
+
         wdt.feed();
         (
             Shared {
                 usb_data,
-                cpu_ticks: 0,
                 wdt,
+                can_layer,
             },
             Resources {
                 adc_data,
@@ -363,40 +379,50 @@ mod app {
         )
     }
 
-    #[idle(shared=[cpu_ticks])]
-    fn idle(mut ctx: idle::Context) -> ! {
+    #[idle]
+    fn idle(_ctx: idle::Context) -> ! {
         let mut syst = unsafe { cortex_m::Peripherals::steal().SYST };
         loop {
+            // Stop interrupts from context switch
             cortex_m::interrupt::disable();
             syst.clear_current();
+            syst.enable_counter();
+            // Wait for something to wake up the CPU
             wfi();
-            ctx.shared
-                .cpu_ticks
-                .lock(|x| *x += 0xFF_FFFF - syst.cvr.read());
+            // Stop counter (We read it later)
+            syst.disable_counter();
+            // Enable context switching, CPU will now perform
+            // the interrupt
             unsafe {
                 cortex_m::interrupt::enable();
             }
+
+            // We can now write down CPU usage since counters were disabled
+            let overflow_count = SYST_OVERFLOW_COUNT.swap(0, Ordering::Relaxed);
+            // Write down CPU usage after interrupt performed (Lowers latency to interrupt)
+            CPU_SLEEP_TICKS.fetch_add(
+                (0xFF_FFFF - syst.cvr.read()) + (0xFF_FFFF * overflow_count),
+                Ordering::Relaxed,
+            );
         }
     }
 
-    #[task(priority = 2, shared=[cpu_ticks, wdt])]
+    #[task(priority = 2, shared=[wdt])]
     async fn cpu_monitor(mut ctx: cpu_monitor::Context) {
+        const TPS: u32 = 100_000_000;
+        const SECOND_MILLIS: u32 = 1000;
+        const UPDATES_PER_SEC: u32 = 2;
+        const MAX_TICKS_PER_UPDATE: u32 = TPS / UPDATES_PER_SEC;
         loop {
+            let now = Mono::now();
             // Reset
-            //let asleep = OS_ASLEEP_TICKS.swap(0, Ordering::SeqCst);
-            let mut asleep = 0;
-            ctx.shared.cpu_ticks.lock(|x| {
-                asleep = *x;
-                *x = 0;
-            });
+            let asleep_ticks = CPU_SLEEP_TICKS.swap(0, Ordering::SeqCst);
+            let percentage: f32 =
+                ((MAX_TICKS_PER_UPDATE - asleep_ticks) * 100) as f32 / MAX_TICKS_PER_UPDATE as f32;
 
-            let actual_ticks = 100_000_000 / 4; // 100Mhz for 1 second
-            info!(
-                "CPU: {}%",
-                (actual_ticks - asleep) as f32 / actual_ticks as f32 * 100.0
-            );
+            info!("CPU: {}%", percentage);
             ctx.shared.wdt.lock(|wdt| wdt.feed());
-            Mono::delay(250u64.millis()).await;
+            Mono::delay_until(now + ((SECOND_MILLIS / UPDATES_PER_SEC) as u64).millis()).await;
         }
     }
 
@@ -448,8 +474,12 @@ mod app {
     }
 
     #[task(priority = 1)]
-    async fn async_init(_: async_init::Context) {
+    async fn async_init(
+        _: async_init::Context,
+        can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
+    ) {
         adc_task::spawn().unwrap();
+        gearbox_task::spawn(can_tx).unwrap_or_else(|_| panic!("Could not start async init"));
         diag_task::spawn().unwrap();
         Mono::delay(1000u64.millis()).await;
         diag_common::ram_info::modify_bootloader_info(|info| {
@@ -460,9 +490,33 @@ mod app {
     #[task(priority = 1, local=[adc_data], shared=[wdt])]
     async fn adc_task(mut cx: adc_task::Context) {
         loop {
+            let now = Mono::now();
             cx.local.adc_data.update().await;
             cx.shared.wdt.lock(|wdt| wdt.feed());
-            Mono::delay(100u64.millis()).await;
+            Mono::delay_until(now + 20u64.millis()).await;
+        }
+    }
+
+    #[task(priority = 2, shared=[can_layer])]
+    async fn gearbox_task(
+        mut cx: gearbox_task::Context,
+        can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
+    ) {
+        loop {
+            let now = Mono::now();
+            // Process inputs
+            cx.shared.can_layer.lock(|lck| lck.read_signals());
+
+            // TODO GEARBOX STUFF
+
+            // Set outputs
+            let mut can = can_tx.access().await;
+            let _ = cx.shared.can_layer.lock(|lck| {
+                lck.write_signals();
+                lck.transmit(&mut can)
+            });
+
+            Mono::delay_until(now + 20u64.millis()).await;
         }
     }
 
@@ -483,15 +537,20 @@ mod app {
         cx.shared.usb_data.poll();
     }
 
-    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, isotp_isr])]
-    fn can0(cx: can0::Context) {
+    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, isotp_isr], shared=[can_layer])]
+    fn can0(mut cx: can0::Context) {
+        let mut buf = [0; 8];
         for interrupt in cx.local.can0_interrupts.iter_flagged() {
             match interrupt {
                 Interrupt::RxFifo0NewMessage => {
                     for msg in cx.local.can0_fifo0.into_iter() {
                         if msg.id() == cx.local.isotp_isr.rx_id {
-                            cx.local.isotp_isr.on_frame_rx(msg.data(), 20, 8);
+                            cx.local.isotp_isr.on_frame_rx(msg.data(), 2, 8);
                         } else {
+                            buf[0..msg.dlc() as usize].copy_from_slice(msg.data());
+                            cx.shared.can_layer.lock(|lck| {
+                                lck.on_frame(msg.id(), &buf);
+                            })
                         }
                     }
                 }
@@ -501,4 +560,10 @@ mod app {
     }
 }
 
-static OS_ASLEEP_TICKS: AtomicU32 = AtomicU32::new(0);
+// For CPU performance counting
+static CPU_SLEEP_TICKS: AtomicU32 = AtomicU32::new(0);
+static SYST_OVERFLOW_COUNT: AtomicU32 = AtomicU32::new(0);
+#[exception]
+fn SysTick() {
+    SYST_OVERFLOW_COUNT.fetch_add(1, Ordering::Relaxed);
+}
