@@ -1,4 +1,4 @@
-use std::{fs::{self, File}, io::BufReader, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 
 mod code_gen;
@@ -27,5 +27,5 @@ fn main() {
     let mut candb_parser = parser::CanDbParser::default();
     candb_parser.parse_file(s);
     let code_generator = CodeGenerator::new(candb_parser.ecus, settings.out_dir);
-    code_generator.code_gen(&settings.layer_name);
+    code_generator.code_gen(&settings.layer_name).unwrap();
 }

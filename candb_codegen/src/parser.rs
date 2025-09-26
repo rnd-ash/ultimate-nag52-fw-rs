@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use convert_case::{Case, Casing};
-use nom::{bytes::complete::{is_not, take_until}, character::{complete::char}, combinator::value, error::ParseError, sequence::{pair, preceded}, IResult, Parser};
+
 
 #[derive(Default, Debug, Clone)]
 pub struct Frame {
     pub name: String,
     pub id: u16,
-    pub signals: Vec<SignalBasic>
+    pub signals: Vec<SignalBasic>,
 }
 
 #[derive(Default)]
@@ -41,8 +41,8 @@ impl CanDbParser {
     pub fn basic_data(line: &str) -> SignalBasic {
         let mut p = line.split(", ");
         let name = p.next().unwrap().trim().split(" ").last().unwrap().to_case(Case::UpperCamel);
-        let offset = u32::from_str_radix(p.next().unwrap().trim().split(": ").last().unwrap(), 10).unwrap();
-        let len = u32::from_str_radix(p.next().unwrap().trim().split(": ").last().unwrap(), 10).expect(&format!("No len in line '{line}'"));
+        let offset = p.next().unwrap().trim().split(": ").last().unwrap().parse::<u32>().unwrap();
+        let len = p.next().unwrap().trim().split(": ").last().unwrap().parse::<u32>().unwrap();
         let dt_str = line.split("DATA TYPE ").last().unwrap().trim();
         let desc = line.split("DESC: ").last().unwrap().split(", DATA TYPE").next().unwrap();
         let dt = if dt_str.starts_with("ENUM") {
@@ -65,16 +65,14 @@ impl CanDbParser {
     pub fn parse_file(&mut self, contents: String) {
         for line in contents.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty(){}
-            else if trimmed.starts_with("#"){} // Comment
-            else if trimmed.starts_with("ECU ") {
-                let ecu_name = &trimmed[4..];
+            if trimmed.is_empty() || trimmed.starts_with("#"){} // Comment of newline
+            else if let Some(ecu_name) = trimmed.strip_prefix("ECU ") {
                 self.new_ecu(ecu_name);
             } else if trimmed.starts_with("FRAME ") {
                 let mut parts = trimmed.split(" ");
                 let _ = parts.next(); // FRAME
                 let frame_name = parts.next().unwrap().trim();
-                let frame_id = parts.next().unwrap().trim_matches(&['(', ')']);
+                let frame_id = parts.next().unwrap().trim_matches(['(', ')']);
                 let frame_id_int = u16::from_str_radix(&frame_id[2..], 16).unwrap();
                 self.new_frame(frame_name, frame_id_int);
             } else if trimmed.starts_with("SIGNAL ") {
@@ -94,12 +92,7 @@ impl CanDbParser {
                             // Sometimes happens for enum variants `_`
                             n = "Underscore".to_string()
                         }
-                        // Remove all SNV values from the table, we handle
-                        // then safely using Option<T>
-                        let c = n.to_ascii_uppercase();
-                        if !c.contains("SNV") && !c.contains("SNA") && !c.contains("UNKNOWN") {
-                            enum_tab.push((raw, n, desc.to_string()));
-                        }
+                        enum_tab.push((raw, n, desc.to_string()));
                     } else {
                         panic!("Adding enum to non enum signal");
                     }
@@ -123,17 +116,12 @@ impl CanDbParser {
         ecu.last_mut()
     }
 
-    pub fn get_frame_list(&mut self) -> Option<&mut Frame> {
-        let ecu = self.ecus.get_mut(&self.curr_ecu)?;
-        ecu.last_mut()
-    }
-
     pub fn new_frame(&mut self, name: &str, id: u16) {
         if let Some(frame_list) = self.ecus.get_mut(&self.curr_ecu) {
             frame_list.push(Frame { 
                 name: name.to_string(), 
-                id: id, 
-                signals: vec![] 
+                id, 
+                signals: vec![],
             });
         } else {
             panic!("Trying to add frame {name} to no valid ECU");

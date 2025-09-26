@@ -1,4 +1,4 @@
-use std::{fs, os, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use convert_case::{Case, Casing};
 
@@ -30,7 +30,7 @@ pub fn codegen_all_dbs(dir_in: PathBuf, dir_out: PathBuf) {
                 let mut candb_parser = parser::CanDbParser::default();
                 candb_parser.parse_file(s);
                 let code_generator = CodeGenerator::new(candb_parser.ecus, out_dir);
-                code_generator.code_gen(&can_name);
+                code_generator.code_gen(&can_name).unwrap();
 
 
             } else {
