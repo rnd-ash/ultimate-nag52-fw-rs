@@ -431,7 +431,7 @@ ECU MS
 			ENUM SNV, RAW: 31, DESC: Code not available
 		SIGNAL FCOD_MOT6, OFFSET: 24, LEN: 1, DESC: Vehicle code engine with 7 bit, bit 6, DATA TYPE BOOL
 		SIGNAL GS_NVH, OFFSET: 25, LEN: 1, DESC: Transmission control not available, DATA TYPE BOOL
-		SIGNAL FCOD_MOT, OFFSET: 26, LEN: 6, MASK: 10111111, DESC: FZGCOD.Motor 7Bit, bit0-5 (bit6 -> signal fcod_mot6), DATA TYPE ENUM
+		SIGNAL FCOD_MOT, OFFSET: 24, LEN: 8, MASK: 10111111, DESC: FZGCOD.Motor 7Bit, bit0-5 (bit6 -> signal fcod_mot6), DATA TYPE ENUM
 			ENUM M272E35, RAW: 0, DESC: M272 E35
 			ENUM M271E18ML105, RAW: 1, DESC: M271 E18 ml Red. (105 kW)
 			ENUM M271E18ML120, RAW: 2, DESC: M271 E18 ml (120 kW)
@@ -937,7 +937,7 @@ ECU KOMBI
 		SIGNAL SGT_VH, OFFSET: 58, LEN: 1, DESC: Segment tacho available, DATA TYPE BOOL
 		SIGNAL ZH_FREIG, OFFSET: 59, LEN: 1, DESC: Release Heaters, DATA TYPE BOOL
 		SIGNAL RT_EIN, OFFSET: 60, LEN: 1, DESC: Switch on Roll Test Mode ESP, DATA TYPE BOOL
-		SIGNAL WRC, OFFSET: 61, LEN: 3, MASK: 10000111, DESC: Winter tire maximum speed with 4 bits, DATA TYPE ENUM
+		SIGNAL WRC, OFFSET: 56, LEN: 8, MASK: 10000111, DESC: Winter tire maximum speed with 4 bits, DATA TYPE ENUM
 			ENUM UBG, RAW: 0, DESC: Unlimited
 			ENUM BG210, RAW: 1, DESC: 210 km / h
 			ENUM BG190, RAW: 2, DESC: 190 km / h

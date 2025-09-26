@@ -261,7 +261,7 @@ ECU KOMBI51
 		SIGNAL SGT_VH, OFFSET: 58, LEN: 1, DESC: Segment tacho available, DATA TYPE BOOL
 		SIGNAL ZH_FREIG, OFFSET: 59, LEN: 1, DESC: Release Heaters, DATA TYPE BOOL
 		SIGNAL RT_EIN, OFFSET: 60, LEN: 1, DESC: Switch on Roll Test Mode ESP, DATA TYPE BOOL
-		SIGNAL WRC, OFFSET: 61, LEN: 3, DESC: Winter tire maximum speed with 4 bits, DATA TYPE ENUM
+		SIGNAL WRC, OFFSET: 56, LEN: 8, DESC: Winter tire maximum speed with 4 bits, DATA TYPE ENUM
 			ENUM UBG, RAW: 0, DESC: Unlimited
 			ENUM BG210, RAW: 1, DESC: 210 km / h
 			ENUM BG190, RAW: 2, DESC: 190 km / h
