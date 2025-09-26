@@ -63,8 +63,8 @@ mod bl_info;
 pub mod kwp;
 pub mod usb;
 
-pub static ST_MIN_EGS: AtomicU8 = AtomicU8::new(10);
-pub static BS_EGS: AtomicU8 = AtomicU8::new(0x20);
+pub static ST_MIN_EGS: AtomicU8 = AtomicU8::new(0x02);
+pub static BS_EGS: AtomicU8 = AtomicU8::new(0x08);
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

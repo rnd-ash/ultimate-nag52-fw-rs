@@ -294,6 +294,9 @@ impl KwpServer {
                 Some(KwpSessionType::Reprogramming) => {
                     self.mode = KwpSessionType::Reprogramming;
                 }
+                Some(KwpSessionType::ExtendedDiagnostics) => {
+                    self.mode = KwpSessionType::ExtendedDiagnostics;
+                }
                 Some(KwpSessionType::Normal) => {
                     self.mode = KwpSessionType::Normal;
                 }
@@ -680,7 +683,7 @@ impl KwpServer {
                         );
                         if self
                             .nvm
-                            .write_flash_from_slice(addr, source, nvm::WriteGranularity::Page)
+                            .write_flash_from_slice(addr, source, nvm::WriteGranularity::QuadWord)
                             .is_err()
                         {
                             Err(KwpError::TransferSuspended)?;
