@@ -1,5 +1,4 @@
 [build]
-target = "thumbv7em-none-eabihf"
 rustflags = [
    # This is needed if your flash or ram addresses are not aligned to 0x10000 in memory.x
    # See https://github.com/rust-embedded/cortex-m-quickstart/pull/95
@@ -10,7 +9,11 @@ rustflags = [
    "link-arg=-Tlink.x",
    "-C",
    "link-arg=-Tdefmt.x",
+   "-C",
+   "linker-plugin-lto",
 ]
+
+target = "thumbv7em-none-eabihf"
 
 [profile.release]
 debug = 2
@@ -18,3 +21,7 @@ lto = "fat"
 opt-level = 3
 codegen-units = 1
 panic = "abort"
+
+[target.thumbv7em-none-eabihf]
+# Uncomment out the speed if you are not using MPLAB Snap
+runner = 'probe-rs run --chip ATSAME54P20A --protocol swd --speed 48000'

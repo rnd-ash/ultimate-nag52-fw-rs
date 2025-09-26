@@ -16,12 +16,13 @@ atsamd-hal = { workspace = true, features = [
 ] }
 bsp = { path = "../bsp" }
 diag_common = { path = "../diag_common", features = ["mcu"] }
-cortex-m = { workspace = true, features = ["inline-asm"] }
+cortex-m = { workspace = true, features = [
+    "inline-asm",
+    "linker-plugin-lto",
+    "critical-section-single-core",
+] }
 cortex-m-rt.workspace = true
 mcan.workspace = true
-
-packed_struct = { version = "0.10.1", default-features = false }
-bitfield-struct = "0.9.5"
 usbd-serial = "0.2.2"
 automotive_diag = { version = "0.1.21", default-features = false, features = [
     "kwp2000",
@@ -34,12 +35,13 @@ defmt-rtt = "1.0.0"
 
 # RTIC
 num-traits = { version = "0.2.19", default-features = false }
-bitvec = { version = "1.0.1", default-features = false }
 rtic = { version = "2.2.0", features = ["thumbv7-backend"] }
 heapless = "0.9.1"
 static_cell = "2.1.1"
 
 futures = { version = "0.3.31", default-features = false }
+bitbybit = "1.4.0"
+arbitrary-int = "2.0.0"
 
 [build-dependencies]
 candb_codegen = { path = "../candb_codegen" }

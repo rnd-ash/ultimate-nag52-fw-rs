@@ -190,12 +190,12 @@ fn next_spinner(mp: &MultiProgress, last_bar: Option<ProgressBar>, stage: u32, o
 
 fn read(mp: &MultiProgress, dest_file: &PathBuf, start_addr: u32, end_addr: u32, server: DynamicDiagSession, fast_mode: bool) -> Result<(), Report> {
     let spinner = next_spinner(&mp, None, 1, 3);
-    spinner.set_message("Enter programming mode");
+    spinner.set_message("Enter extended mode");
     // Now start the command chain
     if fast_mode {
-        server.send_byte_array_with_response(&[KwpCommand::StartDiagnosticSession.into(), KwpSessionType::Reprogramming.into(), 0, 0])?;
+        server.send_byte_array_with_response(&[KwpCommand::StartDiagnosticSession.into(), KwpSessionType::ExtendedDiagnostics.into(), 0, 0])?;
     } else {
-        server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
+        server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
     }
     let spinner = next_spinner(&mp, Some(spinner), 2, 3);
     spinner.set_message(format!("Reading memory ({})", HumanBytes((end_addr-start_addr) as u64)));
@@ -292,7 +292,6 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
     let last = segments.last().unwrap();
     let end_addr = last.phys_addr + last.size;
     let to_flash = end_addr-start_address;
-    println!("{} bytes ({:08X} - {:08X}) {}", end_addr-start_address, start_address, end_addr, to_flash);
     assert!(start_address % 8192 == 0);
     let mut array = vec![0xFFu8; to_flash as usize];
     for seg in segments {
@@ -311,6 +310,7 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
     } else {
         server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
     }
+    std::thread::sleep(Duration::from_millis(100)); // Allow the MCU to reset to bootloader
     let spinner = next_spinner(&mp, Some(spinner), 2, 6);
     spinner.set_message(format!("Erasing flash ({} from 0x{:08X})", HumanBytes((num_pages*8192) as u64), start_address));
 
@@ -332,7 +332,7 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
             Err(DiagError::ECUError { code, def }) => {
                 if code == KwpError::RoutineNotComplete as u8 {
                     // Waiting
-                    sleep(Duration::from_millis(1000));
+                    sleep(Duration::from_millis(500));
                 } else {
                     return Err(DiagError::ECUError { code, def }.into())
                 }
@@ -362,12 +362,11 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
     );
     while addr < array.len() {
         let max_copy = core::cmp::min(MAX_COPY, array.len()-addr);
-        // Start uploading data (512 byte chunks)!
         block[0] = KwpCommand::TransferData.into();
         block[1] = counter;
         block[2..2+max_copy].copy_from_slice(&array[addr..addr+max_copy]);
         pb.set_position(addr as u64);
-        server.send_byte_array_with_response(&block)?;
+        server.send_byte_array_with_response(&block[..max_copy+2])?;
         addr += max_copy;
         counter = counter.wrapping_add(1);
     }
@@ -399,8 +398,8 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
 fn ident(server: DynamicDiagSession) -> Result<(), Report> {
     let mut map: BTreeMap<&'static str, Option<String>> = BTreeMap::new();
     if let Ok(ident) = server.kwp_read_daimler_identification() {
-        map.insert("ECU Production date", Some(format!("{}/{}/20{}", ident.ecu_production_day, ident.ecu_production_month, ident.ecu_production_year)));
-        map.insert("ECU Software date", Some(format!("Week {} of 20{}", ident.ecu_sw_build_week, ident.ecu_sw_build_year)));
+        map.insert("ECU Production date", Some(ident.get_production_date_pretty()));
+        map.insert("ECU Software date (WW/YY)", Some(ident.get_software_date_pretty()));
     } else {
         map.insert("ECU Production date", None);
         map.insert("ECU Software date", None);
@@ -470,8 +469,15 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
     }
 
     println!("{}", style("Identification information").bold().bright_blue());
+    let mut padding = 0;
+    for k in map.keys() {
+        padding = padding.max(k.len());
+    }
+    padding +=1;
+
+
     for (k, v) in map {
-        println!("{: <21}: {}",
+        println!("{: <padding$}: {}",
         style(k).bold(),
         v.map(|x| style(x).green()).unwrap_or(style("REFUSED".into()).bold().red())
         );
@@ -480,13 +486,13 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
     if panic_location.is_some() || panic_msg.is_some() {
         println!("\n{}", style("Application panic information").bold().bright_red());
         if let Some(msg) = panic_msg {
-            println!("{: <21}: {}",
+            println!("{: <padding$}: {}",
                 style("Panic message").bold(),
                 msg
             );
         }
         if let Some((file, line, col)) = panic_location {
-            println!("{: <21}: {}:{}:{}",
+            println!("{: <padding$}: {}:{}:{}",
                 style("Panic location").bold(),
                 file,
                 line,
@@ -552,6 +558,7 @@ fn main() -> Result<()> {
                 );
             }
             mp = MultiProgress::new();
+            std::thread::sleep(Duration::from_millis(100)); // Allow the MCU to reset to bootloader
             flash(&mp, application, &mut server, fast_mode, false)
         },
         Command::Read { start_address, end_address, output_file } => {
