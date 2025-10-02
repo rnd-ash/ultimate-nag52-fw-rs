@@ -1,11 +1,16 @@
 #![no_std]
 #![no_main]
 
+use atsamd_hal::adc;
+use atsamd_hal::adc::Adc0;
+use atsamd_hal::adc::Adc1;
+use atsamd_hal::bind_multiple_interrupts;
 use atsamd_hal::pac::SYST;
 use atsamd_hal::prelude::ExtU64;
 use atsamd_hal::prelude::_embedded_hal_watchdog_Watchdog;
 use atsamd_hal::rtc::rtic::rtc_clock;
 use atsamd_hal::rtic_time::Monotonic;
+use atsamd_hal::sercom::Sercom6;
 use atsamd_hal::{
     clock::v2::{
         clock_system_at_reset,
@@ -39,7 +44,27 @@ pub mod can;
 pub mod diag;
 pub mod maths;
 pub mod sensors;
+pub mod solenoids;
 pub mod usb;
+
+// -- Interrupt handlers for async APIs --  //
+bind_multiple_interrupts!(struct Sercom6Irqs {
+    SERCOM6: [SERCOM6_0, SERCOM6_1, SERCOM6_2, SERCOM6_3, SERCOM6_OTHER] => atsamd_hal::sercom::spi::InterruptHandler<Sercom6>;
+});
+
+atsamd_hal::bind_multiple_interrupts!(struct DmacIrqs {
+    DMAC: [DMAC_0, DMAC_1, DMAC_2, DMAC_OTHER] => atsamd_hal::dmac::InterruptHandler;
+});
+
+atsamd_hal::bind_multiple_interrupts!(pub struct Adc0Irqs {
+    ADC0: [ADC0_RESRDY, ADC0_OTHER] => adc::InterruptHandler<Adc0>;
+});
+
+atsamd_hal::bind_multiple_interrupts!(pub struct Adc1Irqs {
+    ADC1: [ADC1_RESRDY, ADC1_OTHER] => adc::InterruptHandler<Adc1>;
+});
+
+// -- Panic handler -- //
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -51,30 +76,37 @@ fn panic(info: &PanicInfo) -> ! {
     SCB::sys_reset();
 }
 
+// RTIC Monotonic declaration using RTC and Clock32K
 atsamd_hal::rtc_monotonic!(Mono, rtc_clock::Clock32k);
 
+// ISOTP Spec
 const ISOTP_BUF_SIZE: usize = 4096;
-
 pub const CAN_ID_TX: StandardId = unsafe { StandardId::new_unchecked(0x7E9) };
 pub const CAN_ID_RX: StandardId = unsafe { StandardId::new_unchecked(0x7E1) };
 
 #[rtic::app(device = atsamd_hal::pac, dispatchers = [DAC_EMPTY_0, DAC_EMPTY_1, DAC_RESRDY_0, DAC_RESRDY_1])]
 mod app {
-    use core::{
-        cmp::min,
-        sync::atomic::{compiler_fence, Ordering},
-    };
+    use core::sync::atomic::Ordering;
 
     use crate::{
-        can::{egs52::Egs52Can, CanLayerTy},
+        can::{
+            data::slave_mode::SolenoidControl,
+            egs52::Egs52Can,
+            slave::{SlaveCan, SolenoidReport},
+            CanLayer, CanLayerTy,
+        },
         diag::KwpServer,
         sensors::{AdcData, AdcPins},
+        solenoids::{
+            tle8242::{Tle8242, Tle8242Pins, TLE_SPI_BAUD},
+            SolenoidControler,
+        },
         usb::UsbData,
     };
     use atsamd_hal::{
         can::Dependencies,
         clock::v2::{pclk, types::Can0},
-        ehal::digital::OutputPin,
+        dmac::{self, DmaController, PriorityLevel},
         fugit::HertzU32,
         serial_number,
         usb::{
@@ -87,11 +119,8 @@ mod app {
         watchdog::Watchdog,
     };
     use bsp::can_deps::{Capacities, RxFifo0};
-    use cortex_m::{
-        asm::{self, delay, wfe, wfi},
-        interrupt::{disable, enable, free},
-    };
-    use defmt::info;
+    use cortex_m::asm::wfi;
+    use defmt::{info, println};
     use diag_common::isotp_endpoints::{
         can_isotp::{make_isotp_endpoint, IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg},
         usb_isotp::{new_usb_isotp, UsbIsoTpConsumer},
@@ -137,6 +166,8 @@ mod app {
         usb_data: UsbData<'static>,
         wdt: Watchdog,
         can_layer: CanLayerTy,
+
+        slave_can: SlaveCan,
     }
 
     #[init(local = [
@@ -169,11 +200,12 @@ mod app {
         let mut wdt = Watchdog::new(device.wdt);
         wdt.feed();
 
-        // Obeying the max clock speeds for 125C operation,
+        // Obeying the max clock speeds for 125C operation (For AEC-Q100),
         // the processor clock setup shall be configured as follows
         //
         //     OSCULP(32Khz)
-        //     └── RTIC OS Monotonic
+        //     ├── RTIC OS Monotonic
+        //     └── Watchdog (2 sec timeout)
         //
         //     DFLL(48Mhz)
         //     ├── GCLK1 (2Mhz)
@@ -267,12 +299,53 @@ mod app {
             pclk_adc1,
         );
 
-        // TEST
-        pins.sensor_pwr_en
-            .into_push_pull_output()
-            .set_high()
-            .unwrap();
-        pins.sol_pwr_en.into_push_pull_output().set_high().unwrap();
+        // DMA Init (SPI + I2C Requires this)
+        let dmac = DmaController::init(device.dmac, &mut device.pm);
+        let mut fut_dmac = dmac.into_future(DmacIrqs);
+        let dma_channels = fut_dmac.split();
+        // TLE8242 SPI Channels
+        let dma_ch0 = dma_channels.0.init(PriorityLevel::Lvl0);
+        let dma_ch1 = dma_channels.1.init(PriorityLevel::Lvl0);
+
+        // eeprom I2C Channels
+        let dma_ch2 = dma_channels.2.init(PriorityLevel::Lvl0);
+        let dma_ch3 = dma_channels.3.init(PriorityLevel::Lvl0);
+
+        // -- TLE8242 init --
+
+        // Init SPI
+        let (pclk_sercom6, gclk3_80) = Pclk::enable(tokens.pclks.sercom6, gclk3_80);
+        let spi = bsp::tle_spi(
+            pclk_sercom6,
+            TLE_SPI_BAUD,
+            device.sercom6,
+            &mut mclk,
+            pins.tle_sck,
+            pins.tle_si,
+            pins.tle_so,
+        );
+        let spi_fut = spi.into_future(Sercom6Irqs);
+        let spi_fut_dma = spi_fut.with_dma_channels(dma_ch0, dma_ch1);
+
+        let tle8242_pins = Tle8242Pins {
+            phase_sync: pins.tle_phase_sync.into(),
+            fault: pins.tle_fault.into(),
+            reset: pins.tle_reset.into(),
+            enable: pins.tle_enable.into(),
+            clk: pins.tle_clk.into(),
+            cs: pins.tle_cs.into(),
+            led: pins.led_tle_act.into(),
+        };
+        let (tcc0_clock, gclk4_160) = Pclk::enable(tokens.pclks.tcc0_tcc1, gclk4_160);
+        let tle8242: Tle8242<dmac::Ch0, dmac::Ch1> = Tle8242::new(
+            tle8242_pins,
+            spi_fut_dma,
+            &mut mclk,
+            &tcc0_clock.into(),
+            device.tcc0,
+        );
+
+        let solenoid_io = SolenoidControler::new(tle8242, pins.sol_pwr_en.into());
 
         // -- CAN init --
         let (clk_can, gclk2_40) = Pclk::enable(tokens.pclks.can0, gclk2_40);
@@ -356,7 +429,8 @@ mod app {
 
         let can_layer = CanLayerTy::Egs52(Egs52Can::new());
 
-        async_init::spawn(arbiter_cantx).unwrap_or_else(|_| panic!("Could not start async init"));
+        async_init::spawn(arbiter_cantx, solenoid_io)
+            .unwrap_or_else(|_| panic!("Could not start async init"));
         cpu_monitor::spawn().unwrap();
 
         wdt.feed();
@@ -365,6 +439,7 @@ mod app {
                 usb_data,
                 wdt,
                 can_layer,
+                slave_can: SlaveCan::new(),
             },
             Resources {
                 adc_data,
@@ -477,10 +552,14 @@ mod app {
     async fn async_init(
         _: async_init::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
+        mut solenoid_io: SolenoidControler<dmac::Ch0, dmac::Ch1>,
     ) {
         adc_task::spawn().unwrap();
-        gearbox_task::spawn(can_tx).unwrap_or_else(|_| panic!("Could not start async init"));
+        solenoid_io.init().await;
+        gearbox_task::spawn(can_tx, solenoid_io)
+            .unwrap_or_else(|_| panic!("Could not start async init"));
         diag_task::spawn().unwrap();
+
         Mono::delay(1000u64.millis()).await;
         diag_common::ram_info::modify_bootloader_info(|info| {
             info.reset_counter = 0;
@@ -497,24 +576,63 @@ mod app {
         }
     }
 
-    #[task(priority = 2, shared=[can_layer])]
+    #[task(priority = 2, shared=[can_layer, slave_can])]
     async fn gearbox_task(
         mut cx: gearbox_task::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
+        mut solenoid_controller: SolenoidControler<dmac::Ch0, dmac::Ch1>,
     ) {
+        let mut slave = true;
         loop {
             let now = Mono::now();
             // Process inputs
-            cx.shared.can_layer.lock(|lck| lck.read_signals());
+            //cx.shared.can_layer.lock(|lck| lck.read_signals());
 
             // TODO GEARBOX STUFF
 
             // Set outputs
-            let mut can = can_tx.access().await;
-            let _ = cx.shared.can_layer.lock(|lck| {
-                lck.write_signals();
-                lck.transmit(&mut can)
-            });
+            //let mut can = can_tx.access().await;
+            //let _ = cx.shared.can_layer.lock(|lck| {
+            //    lck.write_signals();
+            //    lck.transmit(&mut can)
+            //});
+
+            if slave {
+                // Slave mode has special logic
+                use can::CanLayer;
+                let mut control_frame = SolenoidControl::ZERO;
+                cx.shared
+                    .slave_can
+                    .lock(|lck| lck.read_signals(&mut control_frame));
+
+                let spc_req = control_frame.spc_req().swap_bytes();
+                let mpc_req = control_frame.mpc_req().swap_bytes();
+                let tcc_req = control_frame.tcc_req();
+
+                solenoid_controller.set_mpc_current(mpc_req).await;
+                solenoid_controller.set_spc_current(spc_req).await;
+
+                // Actuate solenoids
+                // Todo - Only do delay and second query if first failed
+                let mut rpt = SolenoidReport::ZERO;
+                let _ = solenoid_controller.read_spc_current().await;
+                Mono::delay(4u64.millis()).await;
+                let spc_current = solenoid_controller.read_spc_current().await;
+                Mono::delay(4u64.millis()).await;
+                let _ = solenoid_controller.read_mpc_current().await;
+                Mono::delay(4u64.millis()).await;
+                let mpc_current = solenoid_controller.read_mpc_current().await;
+                //defmt::println!("{} {}", spc_current, mpc_current);
+
+                rpt.set_mpc_curr(mpc_current.swap_bytes());
+                rpt.set_spc_curr(spc_current.swap_bytes());
+
+                let mut can = can_tx.access().await;
+                let _ = cx.shared.slave_can.lock(|lck| {
+                    lck.write_signals(&rpt);
+                    lck.transmit(&mut can)
+                });
+            }
 
             Mono::delay_until(now + 20u64.millis()).await;
         }
@@ -537,7 +655,7 @@ mod app {
         cx.shared.usb_data.poll();
     }
 
-    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, isotp_isr], shared=[can_layer])]
+    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, isotp_isr], shared=[can_layer, slave_can])]
     fn can0(mut cx: can0::Context) {
         let mut buf = [0; 8];
         for interrupt in cx.local.can0_interrupts.iter_flagged() {
@@ -549,6 +667,9 @@ mod app {
                         } else {
                             buf[0..msg.dlc() as usize].copy_from_slice(msg.data());
                             cx.shared.can_layer.lock(|lck| {
+                                lck.on_frame(msg.id(), &buf);
+                            });
+                            cx.shared.slave_can.lock(|lck| {
                                 lck.on_frame(msg.id(), &buf);
                             })
                         }

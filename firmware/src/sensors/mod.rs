@@ -1,4 +1,5 @@
-use atsamd_hal::adc::CpuVoltageSource;
+use atsamd_hal::adc::{CpuVoltageSource, SampleCount};
+use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::{
     adc::{
         Accumulation, Adc0, Adc1, AdcBuilder, AdcResolution, FutureAdc, InterruptHandler,
@@ -17,32 +18,25 @@ use atsamd_hal::{
 use bsp::{AccelMSense, AccelPSense, SolPwrSense, Tft, VBattSense, VSensorSense, VsolSense};
 use defmt::info;
 
-use crate::maths;
-
-atsamd_hal::bind_multiple_interrupts!(pub struct Adc0Irqs {
-    ADC0: [ADC0_RESRDY, ADC0_OTHER] => InterruptHandler<Adc0>;
-});
-
-atsamd_hal::bind_multiple_interrupts!(pub struct Adc1Irqs {
-    ADC1: [ADC1_RESRDY, ADC1_OTHER] => InterruptHandler<Adc1>;
-});
+use crate::maths::FirstOrderAverage;
+use crate::{maths, Adc0Irqs, Adc1Irqs, Mono};
 
 // All values here are from 0-4095 (12bit ADC reading)
 pub struct AnalogSensors {
     /// Feedback of the 5V sensor supply
-    vsense_feedback: u16,
+    vsense_feedback: FirstOrderAverage<u16, 10>,
     /// Feedback of the KL15 terminal
-    vbatt_feedback: u16,
+    vbatt_feedback: FirstOrderAverage<u16, 10>,
     /// Accelerator + Input voltage
-    accel_p_sense: u16,
+    accel_p_sense: FirstOrderAverage<u16, 10>,
     /// Accelerator - Input voltage
-    accel_m_sense: u16,
+    accel_m_sense: FirstOrderAverage<u16, 10>,
     /// TFT Sensor on the valve body
-    tft: u16,
+    tft: FirstOrderAverage<u16, 10>,
     /// Linear feedback from high side switch for solenoids
-    sol_pwr_sense: u16,
+    sol_pwr_sense: FirstOrderAverage<u16, 10>,
     /// Voltage feedback of the solenoid supply (KL87)
-    vsol_sense: u16,
+    vsol_sense: FirstOrderAverage<u16, 10>,
 }
 
 pub struct AdcPins {
@@ -75,17 +69,21 @@ impl AdcData {
         pclk_adc0: Pclk<clock::v2::pclk::ids::Adc0, P>,
         pclk_adc1: Pclk<clock::v2::pclk::ids::Adc1, P>,
     ) -> Self {
+        // ADC0 has access to the TFT Sensor, therefore, we cannot do any sample averaging at a hardware level!
+        // This is to prevent a situation where the parking lock comes on mid-reading, which in tern causes the voltage
+        // to jump to 3.3V, which (When averaged with valid Temperature readings), would cause a spike in voltage that
+        // isn't quite high enough to be considered Parking lock on state
         let adc_adc0 = AdcBuilder::new(Accumulation::Single(AdcResolution::_12))
             .with_vref(Reference::Intvcc1)
             .with_clock_divider(Prescaler::Div8)
-            .with_clock_cycles_per_sample(8)
+            .with_clock_cycles_per_sample(16)
             .enable(adc0, apb_adc0, &pclk_adc0)
             .unwrap()
             .into_future(Adc0Irqs);
         let adc_adc1 = AdcBuilder::new(Accumulation::Single(AdcResolution::_12))
             .with_vref(Reference::Intvcc1)
             .with_clock_divider(Prescaler::Div8)
-            .with_clock_cycles_per_sample(8)
+            .with_clock_cycles_per_sample(16)
             .enable(adc1, apb_adc1, &pclk_adc1)
             .unwrap()
             .into_future(Adc1Irqs);
@@ -106,25 +104,21 @@ impl AdcData {
     }
 
     pub async fn update(&mut self) {
+        let now = Mono::now().duration_since_epoch().to_micros();
         let mcu_core_supply = self.adc0.read_cpu_voltage(CpuVoltageSource::Core).await;
         // What 4095 means from ADC
         let mcu_io_supply = self.adc0.read_cpu_voltage(CpuVoltageSource::Io).await;
 
-        // R1 is known (2.0KOhm)
-        // R2 is the TFT Sensor
-        let tft_res = self.adc0.read(&mut self.pins.tft).await;
-        let tft_voltage = (tft_res as u32 * mcu_io_supply as u32) / 4095;
-        // Reverse so we figure out R2 (TFT Resistance)
-        // Vout = Vin * (R2/(R1+R2))
-        // => R2 = (Vout * R1) / (Vin - Vout)
-        //
-        let tft_resistance = if tft_res == 4095 {
-            0
-        } else {
-            (tft_voltage * 2000) / (mcu_io_supply as u32 - tft_voltage)
+        let tft_adc = self.adc0.read(&mut self.pins.tft).await;
+        let tft_reading = match tft_adc {
+            r if r > 4090 => TftSensorReading::ParkingLock,
+            _ => {
+                let voltage = (tft_adc as u32 * mcu_core_supply as u32) / 4095;
+                let resistance = (voltage * 2000) / (mcu_core_supply as u32 - voltage);
+                let temperature = maths::interp(resistance as i32, TFT_LOOKUP);
+                TftSensorReading::Temperature(temperature as i16)
+            }
         };
-        let tft_temp = maths::interp(tft_resistance as i32, TFT_LOOKUP);
-        // Vout = Vin * (R2 / (R1+R2))
 
         // Voltage supplies (0-12V) (R1 = 10KOhm, R2 = 2.2KOhm)
         let board_supply = Self::adc_reading_to_source(
@@ -147,19 +141,25 @@ impl AdcData {
         // Current draw
         let solenoid_current = self.adc0.read(&mut self.pins.sol_pwr_sense).await;
         // CPU Temperature
-        let cpu_temp = self.adc0.read_cpu_temperature(&mut self.supc).await;
+        let cpu_temp = self.adc0.read_cpu_temperature(&mut self.supc).await as i16;
+        let time = Mono::now().duration_since_epoch().to_micros() - now;
         //info!(
-        //    "TFT: ({} mV {} Ohm {} C), CPU: {} C. [V_KL30: {} V V_KL87: {} V] MCU Core: {}mV - MCU IO: {}mV",
-        //    tft_voltage,
-        //    tft_resistance,
-        //    tft_temp,
+        //    "{}us, TFT: {}, CPU: {} C. [V_KL30: {} V V_KL87: {} V] MCU Core: {}mV - MCU IO: {}mV",
+        //    time,
+        //    tft_reading,
         //    cpu_temp,
-        //    board_supply  as f32 / 1000.0,
+        //    board_supply as f32 / 1000.0,
         //    solenoid_supply as f32 / 1000.0,
         //    mcu_core_supply,
         //    mcu_io_supply
         //);
     }
+}
+
+#[derive(defmt::Format, Clone, Copy)]
+pub enum TftSensorReading {
+    ParkingLock,
+    Temperature(i16),
 }
 
 // https://www.nxp.com/docs/en/data-sheet/KTY83_SER.pdf

@@ -1,11 +1,7 @@
 #![no_std]
 
 use atsamd_hal::{
-    clock::v2::{
-        gclk::GclkId,
-        pclk::Pclk,
-        types::Usb,
-    },
+    clock::v2::{gclk::GclkId, pclk::Pclk, types::Usb},
     pac::{self, Mclk},
     qspi::{self, Qspi},
     sercom::{
@@ -415,7 +411,16 @@ pub fn ext_flash(
     io2: impl Into<ExtFlashD2>,
     io3: impl Into<ExtFlashD3>,
 ) -> Qspi<qspi::OneShot> {
-    let qspi = qspi::Qspi::new(mclk, qspi, sck.into(), cs.into(), io0.into(), io1.into(), io2.into(), io3.into());
+    let qspi = qspi::Qspi::new(
+        mclk,
+        qspi,
+        sck.into(),
+        cs.into(),
+        io0.into(),
+        io1.into(),
+        io2.into(),
+        io3.into(),
+    );
     qspi
 }
 
@@ -437,7 +442,7 @@ pub type TleSpiPads = spi::Pads<TleSercom, TleSo, TleSi, TleSck>;
 pub type TleSpi = spi::Spi<spi::Config<TleSpiPads>, spi::Duplex>;
 
 pub fn tle_spi<Gclk: GclkId>(
-    pclk_sercom0: Pclk<Sercom6, Gclk>,
+    pclk_sercom6: Pclk<Sercom6, Gclk>,
     baud: Hertz,
     sercom: TleSercom,
     mclk: &mut pac::Mclk,
@@ -453,7 +458,7 @@ pub fn tle_spi<Gclk: GclkId>(
     sck.set_drive_strength(false);
 
     let pads = spi::Pads::default().data_in(so).data_out(si).sclk(sck);
-    spi::Config::new(mclk, sercom, pads, pclk_sercom0.freq())
+    spi::Config::new(mclk, sercom, pads, pclk_sercom6.freq())
         .baud(baud)
         .spi_mode(spi::MODE_0)
         .bit_order(spi::BitOrder::MsbFirst)

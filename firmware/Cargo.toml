@@ -13,6 +13,7 @@ atsamd-hal = { workspace = true, features = [
     "usb",
     "async",
     "rtic",
+    "dma"
 ] }
 bsp = { path = "../bsp" }
 diag_common = { path = "../diag_common", features = ["mcu"] }
@@ -42,6 +43,7 @@ static_cell = "2.1.1"
 futures = { version = "0.3.31", default-features = false }
 bitbybit = "1.4.0"
 arbitrary-int = "2.0.0"
+libm = "0.2.15"
 
 [build-dependencies]
 candb_codegen = { path = "../candb_codegen" }
