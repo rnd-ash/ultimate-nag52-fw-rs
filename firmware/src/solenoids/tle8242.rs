@@ -231,6 +231,7 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
         }
     }
 
+    /// Returns current usage in Milliamps
     pub async fn get_avg_current(&mut self, channel: TleChannel) -> Option<u32> {
         let msg = AverageCurrentRead::new_with_id().with_channel_id(channel);
         let response = self.xfer(msg).await?;
@@ -242,32 +243,23 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
     }
 
     pub async fn xfer<M: TleMsg>(&mut self, msg: M) -> Option<M> {
+        // Note. Timing params (T1, T2, T3) delays are ignored
+        //       the CPU is not fast enough to exceed these limits
         self.pin_led.set_high().unwrap();
         self.pin_cs.set_low().unwrap();
-        // t1 period is 140ns
-        asm::delay(140);
         let buf = msg.into().to_be_bytes();
         let mut read_buf = [0xFF; 4];
         // Write command
         self.spi.transfer(&mut read_buf, &buf).await.ok()?;
-        // t2 period 50ns
-        asm::delay(50);
         self.pin_cs.set_high().unwrap();
         if msg.is_read() {
-            // t3 period 450ns
-            asm::delay(450);
             self.pin_cs.set_low().unwrap();
-            // t1 period is 140ns
-            asm::delay(140);
             self.spi
                 .transfer(&mut read_buf, &0u32.to_be_bytes())
                 .await
                 .ok()?;
-            // t2 period 50ns
-            asm::delay(50);
             self.pin_cs.set_high().unwrap();
             self.pin_led.set_low().unwrap();
-
             let resp_u32 = u32::from_be_bytes(read_buf);
             if msg.id_match(resp_u32) {
                 Some(u32::from_be_bytes(read_buf).into())
@@ -279,55 +271,5 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
             self.pin_led.set_low().unwrap();
             None
         }
-    }
-
-    async fn xfer_batch<const N: usize>(&mut self, reqs: &[u32; N]) -> [Option<u32>; N] {
-        // Compile time check that this is for multiple commands
-        const {
-            assert!(N > 1);
-        }
-
-        let mut resps = [None; N];
-        let mut tmp = [0; 4]; // Reading buffer
-        self.pin_led.set_high().unwrap();
-        for (idx, req) in reqs.iter().enumerate() {
-            self.pin_cs.set_low().unwrap();
-            // t1 period is 140ns
-            asm::delay(140 / 2);
-            // Write command
-            if self
-                .spi
-                .transfer(&mut tmp, &req.to_be_bytes())
-                .await
-                .is_ok()
-            {
-                // Command 1 reply writes to command 0 request (SPI Response from command x is done in command x+1)
-                resps[idx.saturating_sub(1)] = Some(u32::from_le_bytes(tmp));
-            }
-            // t2 period 50ns
-            asm::delay(50 / 2);
-            self.pin_cs.set_high().unwrap();
-            // t3 period 450ns
-            asm::delay(450 / 2);
-        }
-        // Send a last 'dumb' command to get a reply out of the last request
-        self.pin_cs.set_low().unwrap();
-        // t1 period is 140ns
-        asm::delay(140 / 2);
-
-        if self
-            .spi
-            .transfer(&mut tmp, &0u32.to_be_bytes())
-            .await
-            .is_ok()
-        {
-            resps[reqs.len() - 1] = Some(u32::from_le_bytes(tmp));
-        }
-        // t2 period 50ns
-        asm::delay(50 / 2);
-        self.pin_cs.set_high().unwrap();
-
-        self.pin_led.set_low().unwrap();
-        resps
     }
 }

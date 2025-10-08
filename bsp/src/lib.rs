@@ -224,7 +224,7 @@ atsamd_hal::bsp_pins!(
     PB18 {
         name: tcc_pwm
         aliases: {
-            PushPullOutput: TccPwm
+            AlternateF: TccPwm
         }
     },
     // PB19 - NC
