@@ -1,3 +1,5 @@
+use core::ops::Not;
+
 use crate::dyn_panic::AppPanicInfo;
 
 pub const MAX_RESET_COUNT: u8 = 5;
@@ -5,8 +7,9 @@ pub const MAX_RESET_COUNT: u8 = 5;
 #[derive(Clone, Copy)]
 #[repr(C, packed(4))]
 struct BootloaderCommInfo {
-    state: BootloaderRamInfo,
     crc: u32,
+    state: BootloaderRamInfo,
+    crc_not: u32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -36,7 +39,8 @@ const BOOTLOADER_COMM_ADDR: *mut BootloaderCommInfo = 0x20010000 as *mut Bootloa
 // Returns bootloader Comm Info, only if CRC is valid
 pub fn get_bootloader_comm_info() -> Option<BootloaderRamInfo> {
     let bl_ram: &BootloaderCommInfo = unsafe { BOOTLOADER_COMM_ADDR.as_ref().unwrap() };
-    if crc_of_bootloader_state(&bl_ram.state) == bl_ram.crc {
+    let crc = crc_of_bootloader_state(&bl_ram.state);
+    if crc == bl_ram.crc && crc.not() == bl_ram.crc_not {
         Some(bl_ram.state)
     } else {
         None
@@ -46,13 +50,17 @@ pub fn get_bootloader_comm_info() -> Option<BootloaderRamInfo> {
 pub fn create_default_comm_info() {
     let pre = unsafe { BOOTLOADER_COMM_ADDR.as_mut().unwrap() };
     pre.state = Default::default();
-    pre.crc = crc_of_bootloader_state(&pre.state)
+    let crc = crc_of_bootloader_state(&pre.state);
+    pre.crc = crc;
+    pre.crc_not = crc.not();
 }
 
 pub fn modify_bootloader_info<F: FnOnce(&mut BootloaderRamInfo)>(f: F) {
     let pre = unsafe { BOOTLOADER_COMM_ADDR.as_mut().unwrap() };
     f(&mut pre.state);
-    pre.crc = crc_of_bootloader_state(&pre.state)
+    let crc = crc_of_bootloader_state(&pre.state);
+    pre.crc = crc;
+    pre.crc_not = crc.not();
 }
 
 fn crc_of_bootloader_state(state: &BootloaderRamInfo) -> u32 {

@@ -21,3 +21,7 @@ opt-level = 3
 debug = 2
 lto = "thin"
 codegen-units = 1
+
+[target.thumbv7em-none-eabihf]
+# Uncomment out the speed if you are not using MPLAB Snap
+runner = 'probe-rs run --chip ATSAME54P20A --protocol swd --speed 48000'

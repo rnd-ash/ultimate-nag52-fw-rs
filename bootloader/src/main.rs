@@ -82,11 +82,17 @@ fn panic(info: &PanicInfo) -> ! {
 pub const CAN_ID_TX: StandardId = unsafe { StandardId::new_unchecked(0x7E9) };
 pub const CAN_ID_RX: StandardId = unsafe { StandardId::new_unchecked(0x7E1) };
 
+// memory.x
+const RAM_START_ADDR: u32 = 0x20040000;
+
 fn can_app_start(bl_info: &BootloaderInfo) -> bool {
+    // Check app actually exists (Check for vector table)
+    let stack_ptr = unsafe { (MemoryRegion::Application.start_addr() as *const u32).read() };
+    let stack_addr_ok = stack_ptr == RAM_START_ADDR;
     #[cfg(not(feature = "skip-app-check"))]
-    return bl_info.app_flashing_not_done == 0;
+    return bl_info.app_flashing_not_done == 0 && stack_addr_ok;
     #[cfg(feature = "skip-app-check")]
-    return true;
+    return true && stack_addr_ok;
 }
 
 const ISOTP_BUF_SIZE: usize = 4096;
@@ -97,7 +103,6 @@ atsamd_hal::rtc_monotonic!(Mono, rtc_clock::Clock32k);
 mod app {
     use atsamd_hal::clock::v2::types::Can0;
     use automotive_diag::kwp2000::KwpSessionType;
-    use cortex_m::asm::delay;
     use diag_common::{
         isotp_endpoints::{
             can_isotp::{make_isotp_endpoint, IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg},
@@ -195,6 +200,9 @@ mod app {
                     }
                     // Copy the current info
                     old_bootloader_info = ram_info;
+                } else {
+                    // Create default bootloader info if corrupt
+                    create_default_comm_info();
                 }
 
                 let bl_info = bl_info::get_bootloader_info();
