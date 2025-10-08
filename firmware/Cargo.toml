@@ -44,6 +44,7 @@ futures = { version = "0.3.31", default-features = false }
 bitbybit = "1.4.0"
 arbitrary-int = "2.0.0"
 libm = "0.2.15"
+bitflags = "2.9.4"
 
 [build-dependencies]
 candb_codegen = { path = "../candb_codegen" }

@@ -2,6 +2,8 @@ use atsamd_hal::{fugit::ExtU64, pac::SCB, rtic_time::Monotonic};
 use automotive_diag::kwp2000::{KwpCommand, KwpError, KwpSessionType};
 use diag_common::ram_info;
 
+pub mod dev_mode;
+
 use crate::Mono;
 
 #[derive(Copy, Clone)]
@@ -57,7 +59,7 @@ impl KwpServer {
                 Some(KwpSessionType::Reprogramming) => {
                     ram_info::modify_bootloader_info(|inf| {
                         inf.diag_request_bootloader.0 = true;
-                        if cmd.len() == 4  {
+                        if cmd.len() == 4 {
                             inf.diag_request_bootloader.1 = Some((cmd[3], cmd[2]));
                         } else {
                             inf.diag_request_bootloader.1 = None

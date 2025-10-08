@@ -39,6 +39,9 @@ use cortex_m_rt::exception;
 use defmt_rtt as _;
 use diag_common::{dyn_panic::AppPanicInfo, ram_info::modify_bootloader_info};
 use mcan::embedded_can::StandardId;
+use rtic_sync::portable_atomic::AtomicU16;
+
+use crate::diag::dev_mode::EgsDeviceMode;
 
 pub mod can;
 pub mod diag;
@@ -112,6 +115,7 @@ mod app {
         usb::{
             usb_device::{
                 bus::UsbBusAllocator,
+                descriptor::descriptor_type::DEVICE,
                 device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid},
             },
             UsbBus,
@@ -120,7 +124,7 @@ mod app {
     };
     use bsp::can_deps::{Capacities, RxFifo0};
     use cortex_m::asm::wfi;
-    use defmt::{info, println};
+    use defmt::info;
     use diag_common::isotp_endpoints::{
         can_isotp::{make_isotp_endpoint, IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg},
         usb_isotp::{new_usb_isotp, UsbIsoTpConsumer},
@@ -559,8 +563,10 @@ mod app {
         gearbox_task::spawn(can_tx, solenoid_io)
             .unwrap_or_else(|_| panic!("Could not start async init"));
         diag_task::spawn().unwrap();
-
+        // Wait one second - Most likely a crash will happen whilst all the async tasks
+        // are initializing
         Mono::delay(1000u64.millis()).await;
+        // Now reset the reset counter
         diag_common::ram_info::modify_bootloader_info(|info| {
             info.reset_counter = 0;
         });
@@ -582,9 +588,12 @@ mod app {
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
         mut solenoid_controller: SolenoidControler<dmac::Ch0, dmac::Ch1>,
     ) {
-        let mut slave = true;
+        // Gearbox has started, set device mode
+        DEVICE_MODE.store(EgsDeviceMode::SLAVE.bits(), Ordering::Relaxed);
         loop {
             let now = Mono::now();
+            let mode = EgsDeviceMode::from_bits_retain(DEVICE_MODE.load(Ordering::Relaxed));
+
             // Process inputs
             //cx.shared.can_layer.lock(|lck| lck.read_signals());
 
@@ -597,7 +606,7 @@ mod app {
             //    lck.transmit(&mut can)
             //});
 
-            if slave {
+            if mode.contains(EgsDeviceMode::SLAVE) {
                 // Slave mode has special logic
                 use can::CanLayer;
                 let mut control_frame = SolenoidControl::ZERO;
@@ -615,13 +624,9 @@ mod app {
                 // Actuate solenoids
                 // Todo - Only do delay and second query if first failed
                 let mut rpt = SolenoidReport::ZERO;
-                let _ = solenoid_controller.read_spc_current().await;
-                Mono::delay(4u64.millis()).await;
-                let spc_current = solenoid_controller.read_spc_current().await;
-                Mono::delay(4u64.millis()).await;
-                let _ = solenoid_controller.read_mpc_current().await;
-                Mono::delay(4u64.millis()).await;
-                let mpc_current = solenoid_controller.read_mpc_current().await;
+                let spc_current = solenoid_controller.read_spc_current();
+                let mpc_current = solenoid_controller.read_mpc_current();
+                solenoid_controller.update_current_readings().await;
                 //defmt::println!("{} {}", spc_current, mpc_current);
 
                 rpt.set_mpc_curr(mpc_current.swap_bytes());
@@ -688,3 +693,6 @@ static SYST_OVERFLOW_COUNT: AtomicU32 = AtomicU32::new(0);
 fn SysTick() {
     SYST_OVERFLOW_COUNT.fetch_add(1, Ordering::Relaxed);
 }
+
+// For Device mode operation
+static DEVICE_MODE: AtomicU16 = AtomicU16::new(EgsDeviceMode::INITIALIZATION.bits());
