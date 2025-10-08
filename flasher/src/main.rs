@@ -1,22 +1,46 @@
-use std::{collections::BTreeMap, fs, path::PathBuf, thread::sleep, time::{Duration, Instant}};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use chrono::{Datelike, Utc};
 use clap::{builder::styling::Color, *};
 use clap_num::maybe_hex;
+use color_eyre::{
+    eyre::{Report, Result},
+    owo_colors::OwoColorize,
+};
 use console::style;
 use diag_common::BootloaderStayReason;
-use ecu_diagnostics::{channel::{IsoTPChannel, IsoTPSettings}, dynamic_diag::{DiagServerBasicOptions, DiagServerEmptyLogger, DynamicDiagSession, TimeoutConfig}, hardware::{Hardware, HardwareScanner}, kwp2000::{Kwp2000Protocol, KwpCommand, KwpError, KwpSessionType}, DiagError};
-use elf::{abi::PT_LOAD, endian::{self, LittleEndian}};
+use ecu_diagnostics::{
+    channel::{IsoTPChannel, IsoTPSettings},
+    dynamic_diag::{
+        DiagServerBasicOptions, DiagServerEmptyLogger, DynamicDiagSession, TimeoutConfig,
+    },
+    hardware::{Hardware, HardwareScanner},
+    kwp2000::{Kwp2000Protocol, KwpCommand, KwpError, KwpSessionType},
+    DiagError,
+};
+use elf::{
+    abi::PT_LOAD,
+    endian::{self, LittleEndian},
+};
 use indicatif::{HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
-use color_eyre::{eyre::{Report, Result}, owo_colors::OwoColorize};
-use object::{elf::FileHeader32, read::elf::{FileHeader, ProgramHeader}, Endianness};
+use object::{
+    elf::FileHeader32,
+    read::elf::{FileHeader, ProgramHeader},
+    Endianness,
+};
 use serialport::SerialPortType;
 
 use crate::usb_diag_compat::UsbDiagIface;
 
 mod usb_diag_compat;
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 use ecu_diagnostics::hardware::socketcan::SocketCanScanner;
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -38,7 +62,7 @@ pub enum Command {
     /// Set chip security bits
     SetSecurity {
         #[clap(long, short, action)]
-        enable: bool 
+        enable: bool,
     },
     /// Flash an application binary to the TCU
     Flash {
@@ -53,8 +77,8 @@ pub enum Command {
         start_address: u32,
         #[clap(value_parser=maybe_hex::<u32>)]
         end_address: u32,
-        output_file: PathBuf
-    }
+        output_file: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,24 +86,24 @@ pub struct ElfSegment {
     phys_addr: u32,
     virt_addr: u32,
     size: u32,
-    offset_in_elf: u32
+    offset_in_elf: u32,
 }
 
 #[derive(clap::Parser, Clone)]
 pub struct Flasher {
     #[command(subcommand)]
     pub command: Command,
-    #[cfg(not(target_os="windows"))]
+    #[cfg(not(target_os = "windows"))]
     #[clap(value_enum)]
     pub interface: Interface,
-    #[cfg(not(target_os="windows"))]
+    #[cfg(not(target_os = "windows"))]
     #[arg(required_if_eq_any([
         ("interface","Can"),
         ("interface","can"),
         ("interface","Can-fast"),
         ("interface","can-fast")
     ]))]
-    pub can_iface: Option<String>
+    pub can_iface: Option<String>,
 }
 
 pub const EGS_DIAG_SETTINGS: DiagServerBasicOptions = DiagServerBasicOptions {
@@ -107,36 +131,36 @@ fn launch_server_usb() -> Result<DynamicDiagSession, Report> {
     };
 
     let server = DynamicDiagSession::new_over_iso_tp(
-        Kwp2000Protocol::default(), 
-        channel, 
-        egs_isotp_opts, 
-        EGS_DIAG_SETTINGS, 
-        None, 
-        DiagServerEmptyLogger{}
+        Kwp2000Protocol::default(),
+        channel,
+        egs_isotp_opts,
+        EGS_DIAG_SETTINGS,
+        None,
+        DiagServerEmptyLogger {},
     )?;
-    
+
     Ok(server)
 }
 
 fn create_server(fast_mode: &mut bool, args: &Flasher) -> Result<DynamicDiagSession, Report> {
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     let server = match args.interface {
         Interface::Usb => launch_server_usb(),
         Interface::Can => {
             *fast_mode = false;
             launch_server_isotp(&args.can_iface.clone().unwrap(), false)
-        },
+        }
         Interface::CanFast => {
             *fast_mode = true;
             launch_server_isotp(&args.can_iface.clone().unwrap(), true)
         }
     }?;
-    #[cfg(not(target_os="linux"))]
+    #[cfg(not(target_os = "linux"))]
     let server = launch_server_usb()?;
     Ok(server)
 }
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 fn launch_server_isotp(can_iface_name: &str, fast: bool) -> Result<DynamicDiagSession, Report> {
     use ecu_diagnostics::dynamic_diag::DiagServerAdvancedOptions;
 
@@ -144,14 +168,14 @@ fn launch_server_isotp(can_iface_name: &str, fast: bool) -> Result<DynamicDiagSe
     let channel = socket_can.create_iso_tp_channel()?;
 
     let egs_isotp_opts: IsoTPSettings = IsoTPSettings {
-        block_size: if fast {0} else {0x20},
-        st_min: if fast {0} else {10},
+        block_size: if fast { 0 } else { 0x20 },
+        st_min: if fast { 0 } else { 10 },
         extended_addresses: None,
         pad_frame: true,
         can_speed: 500_000,
         can_use_ext_addr: false,
     };
-    let adv_opts = DiagServerAdvancedOptions  {
+    let adv_opts = DiagServerAdvancedOptions {
         global_tp_id: 0,
         tester_present_interval_ms: 2000,
         tester_present_require_response: true,
@@ -161,18 +185,23 @@ fn launch_server_isotp(can_iface_name: &str, fast: bool) -> Result<DynamicDiagSe
     };
 
     let server = DynamicDiagSession::new_over_iso_tp(
-        Kwp2000Protocol::default(), 
-        channel, 
-        egs_isotp_opts, 
-        EGS_DIAG_SETTINGS, 
-        Some(adv_opts), 
-        DiagServerEmptyLogger{}
+        Kwp2000Protocol::default(),
+        channel,
+        egs_isotp_opts,
+        EGS_DIAG_SETTINGS,
+        Some(adv_opts),
+        DiagServerEmptyLogger {},
     )?;
-    
+
     Ok(server)
 }
 
-fn next_spinner(mp: &MultiProgress, last_bar: Option<ProgressBar>, stage: u32, out_of: u32) -> ProgressBar {
+fn next_spinner(
+    mp: &MultiProgress,
+    last_bar: Option<ProgressBar>,
+    stage: u32,
+    out_of: u32,
+) -> ProgressBar {
     if let Some(last_bar) = last_bar {
         let old_msg = last_bar.message();
         last_bar.finish_with_message(format!("{old_msg} {}", style("✔").green()));
@@ -188,29 +217,52 @@ fn next_spinner(mp: &MultiProgress, last_bar: Option<ProgressBar>, stage: u32, o
     next_bar
 }
 
-fn read(mp: &MultiProgress, dest_file: &PathBuf, start_addr: u32, end_addr: u32, server: DynamicDiagSession, fast_mode: bool) -> Result<(), Report> {
+fn read(
+    mp: &MultiProgress,
+    dest_file: &PathBuf,
+    start_addr: u32,
+    end_addr: u32,
+    server: DynamicDiagSession,
+    fast_mode: bool,
+) -> Result<(), Report> {
     let spinner = next_spinner(&mp, None, 1, 3);
     spinner.set_message("Enter extended mode");
     // Now start the command chain
     if fast_mode {
-        server.send_byte_array_with_response(&[KwpCommand::StartDiagnosticSession.into(), KwpSessionType::ExtendedDiagnostics.into(), 0, 0])?;
+        server.send_byte_array_with_response(&[
+            KwpCommand::StartDiagnosticSession.into(),
+            KwpSessionType::ExtendedDiagnostics.into(),
+            0,
+            0,
+        ])?;
     } else {
         server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
     }
     let spinner = next_spinner(&mp, Some(spinner), 2, 3);
-    spinner.set_message(format!("Reading memory ({})", HumanBytes((end_addr-start_addr) as u64)));
+    spinner.set_message(format!(
+        "Reading memory ({})",
+        HumanBytes((end_addr - start_addr) as u64)
+    ));
     let mut v: Vec<u8> = Vec::new();
     let total_bytes = end_addr - start_addr;
 
-    let pb = mp.add(ProgressBar::new(total_bytes as u64).with_message("Reading"))
-        .with_style(ProgressStyle::with_template("{percent}% [{bar:40.cyan/blue}] {msg} {decimal_bytes_per_sec} ETA: {eta}")
-        .unwrap()
-        .progress_chars("##-")
-    );
+    let pb = mp
+        .add(ProgressBar::new(total_bytes as u64).with_message("Reading"))
+        .with_style(
+            ProgressStyle::with_template(
+                "{percent}% [{bar:40.cyan/blue}] {msg} {decimal_bytes_per_sec} ETA: {eta}",
+            )
+            .unwrap()
+            .progress_chars("##-"),
+        );
 
     while (v.len() as u32) < total_bytes {
         let max = std::cmp::min(250, total_bytes - v.len() as u32);
-        pb.set_message(format!("0x{:08X}-0x{:08X}", start_addr + v.len()as u32, start_addr + v.len() as u32 + max));
+        pb.set_message(format!(
+            "0x{:08X}-0x{:08X}",
+            start_addr + v.len() as u32,
+            start_addr + v.len() as u32 + max
+        ));
         let mut req = vec![0x23, max as u8];
         req.extend_from_slice(&(start_addr + v.len() as u32).to_le_bytes());
         let resp = server.send_byte_array_with_response(&req)?;
@@ -225,7 +277,7 @@ fn read(mp: &MultiProgress, dest_file: &PathBuf, start_addr: u32, end_addr: u32,
     Ok(())
 }
 
-fn analyze(file: PathBuf)  -> Result<(), Report> {
+fn analyze(file: PathBuf) -> Result<(), Report> {
     println!("Analyzing {file:?}");
     /*
     let binary_bytes = fs::read(file)?;
@@ -260,19 +312,27 @@ fn analyze(file: PathBuf)  -> Result<(), Report> {
     Ok(())
 }
 
-fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fast_mode: bool, is_bootloader: bool) -> Result<(), Report> {
+fn flash(
+    mp: &MultiProgress,
+    file: &PathBuf,
+    server: &mut DynamicDiagSession,
+    fast_mode: bool,
+    is_bootloader: bool,
+) -> Result<(), Report> {
     let binary_bytes = fs::read(file)?;
     let binary = FileHeader32::<Endianness>::parse(&*binary_bytes)?;
     let endian = binary.endian()?;
-    
+
     let mut segments = Vec::new();
-    
+
     for segment in binary.program_headers(binary.endian()?, &*binary_bytes)? {
         let p_paddr: u64 = segment.p_paddr(endian).into();
         let p_vaddr: u64 = segment.p_vaddr(endian).into();
         let flags = segment.p_flags(endian);
-        let segment_data = segment.data(endian, &*binary_bytes).map_err(|_| Report::msg("Failed to access data for ELF segment"))?;
-        if !segment_data.is_empty() { 
+        let segment_data = segment
+            .data(endian, &*binary_bytes)
+            .map_err(|_| Report::msg("Failed to access data for ELF segment"))?;
+        if !segment_data.is_empty() {
             if segment.p_type(endian) == PT_LOAD {
                 let (segment_offset, segment_filesize) = segment.file_range(endian);
                 segments.push(ElfSegment {
@@ -291,12 +351,15 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
     let start_address = segments[0].phys_addr;
     let last = segments.last().unwrap();
     let end_addr = last.phys_addr + last.size;
-    let to_flash = end_addr-start_address;
+    let to_flash = end_addr - start_address;
     assert!(start_address % 8192 == 0);
     let mut array = vec![0xFFu8; to_flash as usize];
     for seg in segments {
         let offset = seg.phys_addr as usize - start_address as usize;
-        array[offset..offset + seg.size as usize].copy_from_slice(&binary_bytes[seg.offset_in_elf as usize..seg.size as usize + seg.offset_in_elf as usize]);
+        array[offset..offset + seg.size as usize].copy_from_slice(
+            &binary_bytes
+                [seg.offset_in_elf as usize..seg.size as usize + seg.offset_in_elf as usize],
+        );
     }
     let mut num_pages = array.len() / 8192;
     if array.len() % 8192 != 0 {
@@ -306,13 +369,22 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
     spinner.set_message("Enter programming mode");
     // Now start the command chain
     if fast_mode {
-        server.send_byte_array_with_response(&[KwpCommand::StartDiagnosticSession.into(), KwpSessionType::Reprogramming.into(), 0, 0])?;
+        server.send_byte_array_with_response(&[
+            KwpCommand::StartDiagnosticSession.into(),
+            KwpSessionType::Reprogramming.into(),
+            0,
+            0,
+        ])?;
     } else {
         server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
     }
     std::thread::sleep(Duration::from_millis(100)); // Allow the MCU to reset to bootloader
     let spinner = next_spinner(&mp, Some(spinner), 2, 6);
-    spinner.set_message(format!("Erasing flash ({} from 0x{:08X})", HumanBytes((num_pages*8192) as u64), start_address));
+    spinner.set_message(format!(
+        "Erasing flash ({} from 0x{:08X})",
+        HumanBytes((num_pages * 8192) as u64),
+        start_address
+    ));
 
     let mut erase_cmd = [0; 8];
     erase_cmd[0] = 0x31;
@@ -320,24 +392,45 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
     erase_cmd[2..6].copy_from_slice(&(start_address as u32).to_le_bytes());
     erase_cmd[6..8].copy_from_slice(&(num_pages as u16).to_le_bytes());
     server.send_byte_array_with_response(&erase_cmd)?;
+    let mut e_counter = 0;
     loop {
-        match server.send_byte_array_with_response(&[KwpCommand::RequestRoutineResultsByLocalIdentifier.into(), 0xE0]) {
+        match server.send_byte_array_with_response(&[
+            KwpCommand::RequestRoutineResultsByLocalIdentifier.into(),
+            0xE0,
+        ]) {
             Ok(res) => {
                 if res[2] == 0x00 {
                     break;
                 } else {
-                    return Err(Report::msg("Flash erase failed"))
+                    return Err(Report::msg("Flash erase failed"));
                 }
-            },
+            }
             Err(DiagError::ECUError { code, def }) => {
                 if code == KwpError::RoutineNotComplete as u8 {
                     // Waiting
                     sleep(Duration::from_millis(500));
                 } else {
-                    return Err(DiagError::ECUError { code, def }.into())
+                    return Err(DiagError::ECUError { code, def }.into());
                 }
-            },
-            Err(e) => return Err(e.into())
+            }
+            Err(e) => {
+                e_counter += 1;
+                // Can happen after reboot
+                if fast_mode {
+                    server.send_byte_array_with_response(&[
+                        KwpCommand::StartDiagnosticSession.into(),
+                        KwpSessionType::Reprogramming.into(),
+                        0,
+                        0,
+                    ])?;
+                } else {
+                    server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
+                }
+                server.send_byte_array_with_response(&erase_cmd)?;
+                if e_counter == 2 {
+                    return Err(e.into());
+                }
+            }
         }
     }
     // Flash erase completed
@@ -350,23 +443,30 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
     server.send_byte_array_with_response(&download_req)?;
     let mut counter: u8 = 0;
     const MAX_COPY: usize = 1024;
-    let mut block = [0; MAX_COPY+2];
+    let mut block = [0; MAX_COPY + 2];
     let mut addr = 0;
 
     let spinner = next_spinner(&mp, Some(spinner), 4, 6);
-    spinner.set_message(format!("Transfering data  ({})", HumanBytes(array.len() as u64)));
-    let pb = mp.add(ProgressBar::new(array.len() as u64).with_message("Flashing"))
-        .with_style(ProgressStyle::with_template("{percent}% [{bar:40.cyan/blue}] {msg} {decimal_bytes_per_sec} ETA: {eta}")
-        .unwrap()
-        .progress_chars("##-")
-    );
+    spinner.set_message(format!(
+        "Transfering data  ({})",
+        HumanBytes(array.len() as u64)
+    ));
+    let pb = mp
+        .add(ProgressBar::new(array.len() as u64).with_message("Flashing"))
+        .with_style(
+            ProgressStyle::with_template(
+                "{percent}% [{bar:40.cyan/blue}] {msg} {decimal_bytes_per_sec} ETA: {eta}",
+            )
+            .unwrap()
+            .progress_chars("##-"),
+        );
     while addr < array.len() {
-        let max_copy = core::cmp::min(MAX_COPY, array.len()-addr);
+        let max_copy = core::cmp::min(MAX_COPY, array.len() - addr);
         block[0] = KwpCommand::TransferData.into();
         block[1] = counter;
-        block[2..2+max_copy].copy_from_slice(&array[addr..addr+max_copy]);
+        block[2..2 + max_copy].copy_from_slice(&array[addr..addr + max_copy]);
         pb.set_position(addr as u64);
-        server.send_byte_array_with_response(&block[..max_copy+2])?;
+        server.send_byte_array_with_response(&block[..max_copy + 2])?;
         addr += max_copy;
         counter = counter.wrapping_add(1);
     }
@@ -398,8 +498,14 @@ fn flash(mp: &MultiProgress, file: &PathBuf, server: &mut DynamicDiagSession, fa
 fn ident(server: DynamicDiagSession) -> Result<(), Report> {
     let mut map: BTreeMap<&'static str, Option<String>> = BTreeMap::new();
     if let Ok(ident) = server.kwp_read_daimler_identification() {
-        map.insert("ECU Production date", Some(ident.get_production_date_pretty()));
-        map.insert("ECU Software date (WW/YY)", Some(ident.get_software_date_pretty()));
+        map.insert(
+            "ECU Production date",
+            Some(ident.get_production_date_pretty()),
+        );
+        map.insert(
+            "ECU Software date (WW/YY)",
+            Some(ident.get_software_date_pretty()),
+        );
     } else {
         map.insert("ECU Production date", None);
         map.insert("ECU Software date", None);
@@ -445,7 +551,9 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
                 BootloaderStayReason::Watchdog => style("Watchdog triggered").red(),
                 BootloaderStayReason::Panic => style("Application panicked (See below)").red(),
                 BootloaderStayReason::MagicPin => style("Magic pin held high").green(),
-                BootloaderStayReason::AppInvalid => style("Application invalid or flashing not completed").yellow(),
+                BootloaderStayReason::AppInvalid => {
+                    style("Application invalid or flashing not completed").yellow()
+                }
                 BootloaderStayReason::Unkown => style("Unknown").yellow(),
             };
             map.insert("In Bootloader reason", Some(format!("{}", txt)));
@@ -462,37 +570,41 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
                     panic_location = Some((file.to_string(), line, column));
                 }
             }
-
         } else {
             map.insert("In Bootloader reason", None);
         }
     }
 
-    println!("{}", style("Identification information").bold().bright_blue());
+    println!(
+        "{}",
+        style("Identification information").bold().bright_blue()
+    );
     let mut padding = 0;
     for k in map.keys() {
         padding = padding.max(k.len());
     }
-    padding +=1;
-
+    padding += 1;
 
     for (k, v) in map {
-        println!("{: <padding$}: {}",
-        style(k).bold(),
-        v.map(|x| style(x).green()).unwrap_or(style("REFUSED".into()).bold().red())
+        println!(
+            "{: <padding$}: {}",
+            style(k).bold(),
+            v.map(|x| style(x).green())
+                .unwrap_or(style("REFUSED".into()).bold().red())
         );
     }
 
     if panic_location.is_some() || panic_msg.is_some() {
-        println!("\n{}", style("Application panic information").bold().bright_red());
+        println!(
+            "\n{}",
+            style("Application panic information").bold().bright_red()
+        );
         if let Some(msg) = panic_msg {
-            println!("{: <padding$}: {}",
-                style("Panic message").bold(),
-                msg
-            );
+            println!("{: <padding$}: {}", style("Panic message").bold(), msg);
         }
         if let Some((file, line, col)) = panic_location {
-            println!("{: <padding$}: {}:{}:{}",
+            println!(
+                "{: <padding$}: {}:{}:{}",
                 style("Panic location").bold(),
                 file,
                 line,
@@ -507,19 +619,33 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
 fn burn_date(server: DynamicDiagSession) -> Result<(), Report> {
     server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
     let date = Utc::now();
-    let mut req = [KwpCommand::StartRoutineByLocalIdentifier as u8, 0x24, 0,0,0,0];
+    let mut req = [
+        KwpCommand::StartRoutineByLocalIdentifier as u8,
+        0x24,
+        0,
+        0,
+        0,
+        0,
+    ];
     req[2] = date.day() as u8; // Day
     req[3] = date.iso_week().week() as u8; // Week
     req[4] = date.month() as u8; // Month
     req[5] = (date.year() % 100) as u8; // Year
     server.send_byte_array_with_response(&req)?;
-    println!("Burnt production date: {}/{}/{} (Week {})", req[2], req[4], req[5],  req[3]);
+    println!(
+        "Burnt production date: {}/{}/{} (Week {})",
+        req[2], req[4], req[5], req[3]
+    );
     Ok(())
 }
 
 fn set_security_lock(server: DynamicDiagSession, en: bool) -> Result<(), Report> {
     server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
-    server.send_byte_array_with_response(&[KwpCommand::StartRoutineByLocalIdentifier.into(), 0xFE, en as u8])?;
+    server.send_byte_array_with_response(&[
+        KwpCommand::StartRoutineByLocalIdentifier.into(),
+        0xFE,
+        en as u8,
+    ])?;
     Ok(())
 }
 
@@ -539,50 +665,63 @@ fn main() -> Result<()> {
 
     let mut mp = MultiProgress::new();
     let res = match &args.command {
-        Command::Flash { bootloader, application } => {
+        Command::Flash {
+            bootloader,
+            application,
+        } => {
             let has_bootloader = bootloader.is_some();
             if let Some(loader) = bootloader {
-                println!("{}", 
+                println!(
+                    "{}",
                     style("Flashing bootloader (Stage 1/2)").bold().green()
                 );
                 flash(&mp, loader, &mut server, fast_mode, true)?;
             }
             drop(mp);
             if has_bootloader {
-                println!("{}", 
+                println!(
+                    "{}",
                     style("Flashing application (Stage 2/2)").bold().green()
                 );
             } else {
-                println!("{}", 
-                    style("Flashing application").bold().green()
-                );
+                println!("{}", style("Flashing application").bold().green());
             }
             mp = MultiProgress::new();
             std::thread::sleep(Duration::from_millis(100)); // Allow the MCU to reset to bootloader
             flash(&mp, application, &mut server, fast_mode, false)
-        },
-        Command::Read { start_address, end_address, output_file } => {
-                read(&mp, output_file, *start_address, *end_address, server, fast_mode)
-            },
-        Command::Ident => {
-                ident(server)
-            }
-        Command::BurnDate => {
-                burn_date(server)
-            }
-        Command::SetSecurity { enable } => {
-            set_security_lock(server, *enable)
-        },
-        Command::Analyze { .. } => { unreachable!() }
+        }
+        Command::Read {
+            start_address,
+            end_address,
+            output_file,
+        } => read(
+            &mp,
+            output_file,
+            *start_address,
+            *end_address,
+            server,
+            fast_mode,
+        ),
+        Command::Ident => ident(server),
+        Command::BurnDate => burn_date(server),
+        Command::SetSecurity { enable } => set_security_lock(server, *enable),
+        Command::Analyze { .. } => {
+            unreachable!()
+        }
     };
     if res.is_err() {
         mp.clear()?;
     }
     res?;
 
-    println!("{}", 
-        style(format!("Completed in {}", HumanDuration(start_timer.elapsed()))).bold().green()
+    println!(
+        "{}",
+        style(format!(
+            "Completed in {}",
+            HumanDuration(start_timer.elapsed())
+        ))
+        .bold()
+        .green()
     );
     Ok(())
 }
-
