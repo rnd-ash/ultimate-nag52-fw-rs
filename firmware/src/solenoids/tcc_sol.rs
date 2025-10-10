@@ -1,79 +1,153 @@
-// The torque converter solenoid on the 722.6 operates using special characteristics:
-//
-// There is an electrical PWM of 1000Hz driving the solenoid, but this wave is turned on and off
-// at 100Hz to create a hydraulic PWM in the solenoid. This is done using a second input for a Zener shutoff MOSFET
-//
-// between PWM 0-14/255, the TCC solenoid is turned off, and after 244/255, the Zener shutoff is permenetly off.
-//
-// Between these PWM ranges, the TCC solenoid operates as follows.
-//
-// 1. TCC solenoid 1000Hz wave is activated, the Zener shutoff is off. (100Hz PWM is done at 99% duty) - Inrush phase
-// 2. After 2.5ms, the 1000Hz wave is reduced to a 40% duty (Approx) - Hold phase
-// 3. After n/255 duty time, the 1000Hz wave is stopped, and the Zener shutoff output is activated
+//! The torque converter solenoid on the 722.6 operates using special characteristics:
+//!
+//! There is an electrical PWM of 1000Hz driving the solenoid, but this wave is turned on and off
+//! at 100Hz to create a hydraulic PWM. This hydraulic PWM acts as a pump to push fluid into the torque
+//! converter clutch. This is done using a second input for a Zener shutoff MOSFET, which when activated
+//! causes the torque converter solenoid to rapidly slam shut, rather than slowly close due to magnetic field decay.
+//!
+//! The solenoid is controled using a finite state machine, which can have the following modes of operation:
+//!
+//! ## Below PWM 14/255 (Off)
+//! In this state, the electrical PWM of the solenoid is off, and the Zener pin is off
+//!
+//! ## Above PWM 244/255 (Full on)
+//! In this state, the electrical PWM of the solenoid is on at 25%, the Zener pin is off
+//!
+//! ## Between PWM 14-244/255 (Zener control)
+//! This phase requires the use of the state machine. It is split into 3 distinct phases:
+//!
+//! 1 (Inrush phase). Electrical PWM to the solenoid is switched on at 99%, Zener pin is off
+//! 2 (Hold phase). Electrical PWM to the solenoid is reduced to 25%, Zener pin is off
+//! 3 (Zener off phase). Electrical PWM to the solenoid is turned off, the Zener pin is switched on, causing the solenoid to slam shut
+//!
+//! The inrush phase is at maximum 2.5ms in duration. Therefore, if the total on time is less than 2.5ms,
+//! phase (2 - Hold) is skipped, and the solenoid is switched off.
 
-// Inputs:
+// IO required:
 // TCC PWM   - PB18 TCC1[0]
 // TCC Zener - PB16 Tcc3[0]/TC6[0]
 // TCC FDBK  - PB17 EIC[1]/TC6[1]/TCC3[1]
 
+use core::{u16, u32};
+
 use atsamd_hal::{
-    async_hal::interrupts::TC7,
-    clock::{Tc6Tc7Clock, Tcc0Tcc1Clock},
+    clock::{Tcc0Tcc1Clock, Tcc2Tcc3Clock},
     ehal::digital::OutputPin,
+    fugit::ExtU32,
     gpio::{AlternateF, PB18},
-    pac::{Mclk, Tc7, Tcc1},
-    prelude::{InterruptDrivenTimer, _embedded_hal_Pwm},
+    pac::{Mclk, Tcc1, Tcc2},
+    prelude::_embedded_hal_Pwm,
     pwm::{Channel, TCC1Pinout, Tcc1Pwm},
     time::Hertz,
-    timer::TimerCounter,
+    timer_params::TimerParams,
 };
 use bsp::{TccCutoff, TccPwm};
 
-const TCC1_CHANNEL_PWM: Channel = Channel::_1;
+/// TCC channel for the PWM wave
+const TCC1_CHANNEL_PWM: Channel = Channel::_0;
 
-const NS_FULL_PERIOD: u32 = 10000000; // Nanoseconds per full Hydraulic PWM period
+/// Nanoseconds per Hydraulic PWM Period
+const NS_FULL_PERIOD: u32 = 10_000_000;
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum CurrentMode {
-    Disabled,
-    OffInrush {
-        inrush_pwm: u32,
-        state: u8,
+/// Torque converter clutch Timer capture counter
+///
+/// A thin wrapper around TCC2 for adding multiple
+/// watchpoints which are required for the 3 phase
+/// cointrol of the torque converter solenoid.
+pub struct TccTcc {
+    inner: Tcc2,
+    // Cycles for a full 10ms window
+    pub full_window_cycles: u32,
+}
 
-        off_time_ns: u32,
-        inrush_time_ns: u32,
-    },
-    OffInrushHold {
-        inrush_pwm: u32,
-        hold_pwm: u32,
-        state: u8,
+impl TccTcc {
+    pub fn setup(tcc: Tcc2, clk: &Tcc2Tcc3Clock, mclk: &mut Mclk) -> Self {
+        mclk.apbcmask().modify(|_, w| w.tcc2_().set_bit());
+        tcc.ctrla().write(|w| w.enable().clear_bit());
+        while tcc.syncbusy().read().enable().bit_is_set() {}
+        tcc.ctrla().write(|w| w.swrst().set_bit());
+        while tcc.syncbusy().read().swrst().bit_is_set() {}
 
-        off_time_ns: u32,
-        inrush_time_ns: u32,
-        hold_time_ns: u32,
-    },
+        let maximum = TimerParams::new_ns(NS_FULL_PERIOD.nanos(), clk.freq());
+
+        // Enable period at 10ms (Complete cycle)
+        unsafe { tcc.per().modify(|_, w| w.per().bits(maximum.cycles)) };
+        // Enable CC0 and CC1, but set their watchpoints above the Period value,
+        // so the threshold is never reached to trigger the interrupt
+        unsafe { tcc.cc(0).modify(|_, w| w.cc().bits(u32::MAX)) };
+        unsafe { tcc.cc(1).modify(|_, w| w.cc().bits(u32::MAX)) };
+        // Enable our interrupts
+        tcc.intenset().write(|s| {
+            s.mc0().set_bit();
+            s.mc1().set_bit();
+            s.ovf().set_bit()
+        });
+        // Period value dicates the max of the counter
+        tcc.wave().modify(|_, w| w.wavegen().nfrq());
+
+        tcc.ctrlbset().write(|w| {
+            // Count up
+            w.dir().clear_bit();
+            // Reset on hitting period value (To 0)
+            w.oneshot().clear_bit()
+        });
+        // Set timer divider for counting
+        tcc.ctrla().modify(|_, w| {
+            match maximum.divider {
+                1 => w.prescaler().div1(),
+                2 => w.prescaler().div2(),
+                4 => w.prescaler().div4(),
+                8 => w.prescaler().div8(),
+                16 => w.prescaler().div16(),
+                64 => w.prescaler().div64(),
+                256 => w.prescaler().div256(),
+                1024 => w.prescaler().div1024(),
+                _ => unreachable!(),
+            };
+            // Start timer
+            w.enable().set_bit();
+            w.runstdby().set_bit()
+        });
+
+        Self {
+            inner: tcc,
+            full_window_cycles: maximum.cycles,
+        }
+    }
+
+    #[inline]
+    /// Sets the watchpoints for P1 and P2 (Inrush and Hold times)
+    /// * Set to u32::MAX to disable the watch point
+    pub fn set_watchpoints(&mut self, p1: u32, p2: u32) {
+        unsafe {
+            self.inner.cc(0).modify(|_, w| w.cc().bits(p1));
+            self.inner.cc(1).modify(|_, w| w.cc().bits(p2));
+        };
+    }
 }
 
 pub struct TccSol {
     tcc_pwm: Tcc1Pwm<PB18, AlternateF>,
-    timer: TimerCounter<Tc7>,
+    tcctcc: TccTcc,
     max_duty: u32,
-
-    hydraulic_pwm: u16,
-    on_elec_pwm: u16,
-    hold_elec_pwm: u16,
-
     zener_pin: TccCutoff,
-    stage: CurrentMode,
-    stage_isr: CurrentMode,
+
+    /// Phase 1 timer watchpoint value
+    phase_1_count: u32,
+    /// Phase 2 timer watchpoint value
+    phase_2_count: u32,
+    /// Phase 1 duty cycle
+    phase_1_pwm: u32,
+    /// Phase 2 duty cycle
+    phase_2_pwm: u32,
 }
 
 impl TccSol {
     pub fn new(
         tcc1: Tcc1,
-        tc7: Tc7,
+        tcc2: Tcc2,
         tcc1_clock: &Tcc0Tcc1Clock,
-        tc7_clock: &Tc6Tc7Clock,
+        tcc2_clock: &Tcc2Tcc3Clock,
         pwm: TccPwm,
         zener: TccCutoff,
         mclk: &mut Mclk,
@@ -83,85 +157,87 @@ impl TccSol {
         tcc_pwm.enable(TCC1_CHANNEL_PWM);
         tcc_pwm.set_duty(TCC1_CHANNEL_PWM, 0);
         let max_duty = tcc_pwm.get_max_duty();
-
-        let timer = TimerCounter::tc7_(tc7_clock, tc7, mclk);
+        let tcctcc = TccTcc::setup(tcc2, &tcc2_clock, mclk);
 
         Self {
             tcc_pwm,
             max_duty,
-            timer,
-            hydraulic_pwm: 0,
-            on_elec_pwm: 0,
-            hold_elec_pwm: 0,
+            tcctcc,
             zener_pin: zener,
-            stage: CurrentMode::Disabled,
-            stage_isr: CurrentMode::Disabled,
+            phase_1_count: u32::MAX,
+            phase_2_count: u32::MAX,
+            phase_1_pwm: 0,
+            phase_2_pwm: 0,
         }
     }
 
     pub fn write_tcc_sol(&mut self, pwm: u16) {
         if pwm < 3000 {
-            // Off (PWM too low)
-            self.timer.disable_interrupt();
-            self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, 0);
-            self.zener_pin.set_low().unwrap();
-            self.stage = CurrentMode::Disabled;
+            // Solid off
+            self.phase_1_count = u32::MAX;
+            self.phase_2_count = u32::MAX;
+            self.phase_1_pwm = 0;
+            self.phase_2_pwm = 0;
         } else if pwm > 62000 {
-            // Hold on (PWM too high)
-            self.timer.disable_interrupt();
-            self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, self.max_duty / 4);
-            self.zener_pin.set_low().unwrap();
-            self.stage = CurrentMode::Disabled;
+            //  Solid on
+            self.phase_1_count = u32::MAX;
+            self.phase_2_count = u32::MAX;
+            self.phase_1_pwm = self.max_duty / 4;
+            self.phase_2_pwm = 0;
         } else {
-            // Off, Inrush, Hold, Off
-            self.timer.enable_interrupt();
-            self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, 0);
-            self.zener_pin.set_low().unwrap();
-            self.stage = CurrentMode::Disabled;
-            let hydr_pwm_on_time = (NS_FULL_PERIOD as f32 * (pwm as f32 / u16::MAX as f32)) as u32;
-            // > 2ms, we can add a hold phase
-            if hydr_pwm_on_time > 2 * 1000 * 1000 {
-                let inrush_time = 2 * 1000 * 1000;
-                let hold_time = hydr_pwm_on_time - inrush_time;
-                let off_time = NS_FULL_PERIOD - (inrush_time + hold_time);
-                self.stage = CurrentMode::OffInrushHold {
-                    inrush_pwm: self.max_duty,
-                    hold_pwm: self.max_duty / 4,
-                    state: 0,
-                    off_time_ns: off_time,
-                    inrush_time_ns: inrush_time,
-                    hold_time_ns: hold_time,
-                }
+            // Off -> Inrush -> (Hold)
+            let cycles_on =
+                ((pwm as f32 / u16::MAX as f32) * self.tcctcc.full_window_cycles as f32) as u32;
+            let cycles_inrush_max = ((2_500_000 as f32 / NS_FULL_PERIOD as f32)
+                * self.tcctcc.full_window_cycles as f32) as u32;
+
+            let cycles_inrush = core::cmp::min(cycles_on, cycles_inrush_max);
+            let cycles_hold = cycles_on.saturating_sub(cycles_inrush);
+
+            self.phase_1_count = cycles_inrush;
+            self.phase_1_pwm = (self.max_duty as f32 * 0.9) as u32;
+            if 0 != cycles_hold {
+                // Inrush  + Hold
+                self.phase_2_count = cycles_inrush + cycles_hold;
+                self.phase_2_pwm = self.max_duty / 4;
             } else {
-                // Too short for hold phase
-                let off_time = NS_FULL_PERIOD - (hydr_pwm_on_time);
-                self.stage = CurrentMode::OffInrush {
-                    inrush_pwm: self.max_duty,
-                    state: 0,
-                    off_time_ns: off_time,
-                    inrush_time_ns: hydr_pwm_on_time,
-                }
+                // Just Inrush
+                self.phase_2_count = u32::MAX;
+                self.phase_2_pwm = 0;
             }
         }
     }
 
-    pub fn on_timer_interrupt(&mut self) {
-        match &mut self.stage_isr {
-            CurrentMode::Disabled => {}
-            CurrentMode::OffInrush {
-                inrush_pwm,
-                state,
-                off_time_ns,
-                inrush_time_ns,
-            } => todo!(),
-            CurrentMode::OffInrushHold {
-                inrush_pwm,
-                hold_pwm,
-                state,
-                off_time_ns,
-                inrush_time_ns,
-                hold_time_ns,
-            } => todo!(),
-        }
+    /// On a full period elapsed interrupt
+    /// (Overflow)
+    pub fn on_tcc_ovf(&mut self) {
+        // Clear Interrupt flag
+        self.tcctcc.inner.intflag().write(|w| w.ovf().set_bit());
+        // As its a fresh period, set the watchpoints
+        self.tcctcc
+            .set_watchpoints(self.phase_1_count, self.phase_2_count);
+        self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, self.phase_1_pwm);
+        self.zener_pin.set_low().unwrap();
+    }
+
+    /// On P1 time (Transition to P2)
+    pub fn on_tcc_mc0(&mut self) {
+        // Clear Interrupt flag
+        self.tcctcc.inner.intflag().write(|w| w.mc0().set_bit());
+        // Could be going to Hold (Inrush -> Hold -> Off) or directly to off (Inrush -> Off)
+        // Hence the expression for the zener pin
+        self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, self.phase_2_pwm);
+        self.zener_pin
+            .set_state((self.phase_2_pwm == 0).into())
+            .unwrap();
+    }
+
+    /// On P2 time (Transition to P0)
+    pub fn on_tcc_mc1(&mut self) {
+        // Clear Interrupt flag
+        self.tcctcc.inner.intflag().write(|w| w.mc1().set_bit());
+        // Always going to off from this phase (Hold -> Off)
+        self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, 0);
+        self.zener_pin.set_high().unwrap();
     }
 }

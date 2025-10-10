@@ -1,17 +1,11 @@
-use atsamd_hal::{
-    dmac, ehal::digital::OutputPin, fugit::ExtU64, rtic_time::Monotonic, time::Hertz,
-};
+use atsamd_hal::{dmac, ehal::digital::OutputPin, time::Hertz};
 use bsp::SolPwrEn;
-use defmt::println;
-use rtic_sync::signal::SignalWriter;
 
-use crate::{
-    solenoids::{
-        commands::{CtrlMethodFaultMaskCfg, ShortToBatThreshold, TleChannel},
-        solenoid_ctrl::{DitherSettings, Mode},
-        tle8242::{ChannelProps, Tle8242, TleConfiguration, R_SENSE_VAL, TLE8242_CLK_FREQ},
-    },
-    Mono,
+use crate::solenoids::{
+    commands::{ShortToBatThreshold, TleChannel},
+    solenoid_ctrl::{DitherSettings, Mode},
+    tcc_sol::TccSol,
+    tle8242::{ChannelProps, Tle8242, TleConfiguration, R_SENSE_VAL, TLE8242_CLK_FREQ},
 };
 
 pub mod commands;
@@ -174,6 +168,10 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
 
     pub async fn set_y5_pwm(&mut self, duty: f32) {
         self.tle8242.set_channel_pwm(TLE_CHAN_Y5, duty).await;
+    }
+
+    pub fn set_tcc_pwm(&mut self, duty: u16, sol_tcc: &mut TccSol) {
+        sol_tcc.write_tcc_sol(duty);
     }
 
     /// Task is responsible for updating all solenoids on demand,

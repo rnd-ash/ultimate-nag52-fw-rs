@@ -5,7 +5,6 @@ use atsamd_hal::adc;
 use atsamd_hal::adc::Adc0;
 use atsamd_hal::adc::Adc1;
 use atsamd_hal::bind_multiple_interrupts;
-use atsamd_hal::pac::SYST;
 use atsamd_hal::prelude::ExtU64;
 use atsamd_hal::prelude::_embedded_hal_watchdog_Watchdog;
 use atsamd_hal::rtc::rtic::rtc_clock;
@@ -23,18 +22,9 @@ use atsamd_hal::{
     },
     pac::SCB,
 };
-use core::cell::Cell;
-use core::cell::RefCell;
-use core::cell::UnsafeCell;
+use core::panic::PanicInfo;
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
-use core::{
-    fmt::write,
-    ops::Deref,
-    panic::{PanicInfo, PanicMessage},
-};
-use cortex_m::interrupt::Mutex;
 use cortex_m_rt::exception;
 use defmt_rtt as _;
 use diag_common::{dyn_panic::AppPanicInfo, ram_info::modify_bootloader_info};
@@ -101,6 +91,7 @@ mod app {
         diag::KwpServer,
         sensors::{AdcData, AdcPins},
         solenoids::{
+            tcc_sol::TccSol,
             tle8242::{Tle8242, Tle8242Pins, TLE_SPI_BAUD},
             SolenoidControler,
         },
@@ -115,7 +106,6 @@ mod app {
         usb::{
             usb_device::{
                 bus::UsbBusAllocator,
-                descriptor::descriptor_type::DEVICE,
                 device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid},
             },
             UsbBus,
@@ -124,7 +114,7 @@ mod app {
     };
     use bsp::can_deps::{Capacities, RxFifo0};
     use cortex_m::asm::wfi;
-    use defmt::info;
+    use defmt::{info, println};
     use diag_common::isotp_endpoints::{
         can_isotp::{make_isotp_endpoint, IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg},
         usb_isotp::{new_usb_isotp, UsbIsoTpConsumer},
@@ -172,6 +162,7 @@ mod app {
         can_layer: CanLayerTy,
 
         slave_can: SlaveCan,
+        soltcc: TccSol,
     }
 
     #[init(local = [
@@ -184,7 +175,7 @@ mod app {
         isotp_msg_signal_can: Signal<SharedIsoTpBuf<ISOTP_BUF_SIZE>> = Signal::new(),
         isotp_msg_signal_usb: Signal<SharedIsoTpBuf<ISOTP_BUF_SIZE>> = Signal::new(),
         arbiter_cantx: Option<Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>> = None
-        arbiter_serial: Option<Arbiter<SerialPort<'static, UsbBus, DefaultBufferStore, DefaultBufferStore>>> = None
+        arbiter_serial: Option<Arbiter<SerialPort<'static, UsbBus, DefaultBufferStore, DefaultBufferStore>>> = None,
     ])]
     fn init(cx: init::Context) -> (Shared, Resources) {
         let mut device = cx.device;
@@ -215,18 +206,19 @@ mod app {
         //     ├── GCLK1 (2Mhz)
         //     │   ├── DPLL0(100Mhz)
         //     C   │   └── GCLK0(100Mhz)
-        //     L   │       └── F_CPU
-        //     K   │           └── QSPI
-        //     │   └── DPLL1(160Mhz)
-        //     R       ├── GCLK2(40Mhz)
-        //     E       │   └── CAN0
-        //     C       ├── GCLK3(80Mhz)
-        //     O       │   ├── ADC0
-        //     V       │   ├── ADC1
-        //     E       │   ├── SERCOM(s)
-        //     R       │   └── EIC
-        //     Y       └── GCLK4(160Mhz)
-        //     │           └── TC/TCC(s)
+        //     L   │       ├── TCC2 (TCC Solenoid)
+        //     K   │       └── F_CPU
+        //     │   │           └── QSPI
+        //     R   └── DPLL1(160Mhz)
+        //     E       ├── GCLK2(40Mhz)
+        //     C       │   └── CAN0
+        //     O       ├── GCLK3(80Mhz)
+        //     V       │   ├── ADC0
+        //     E       │   ├── ADC1
+        //     R       │   ├── SERCOM(s)
+        //     Y       │   └── EIC
+        //     │       └── GCLK4(160Mhz)
+        //     |           └── TCC0
         //     └── GCLK6 (48Mhz)
         //         └── USB
 
@@ -315,6 +307,22 @@ mod app {
         let dma_ch2 = dma_channels.2.init(PriorityLevel::Lvl0);
         let dma_ch3 = dma_channels.3.init(PriorityLevel::Lvl0);
 
+        let (tcc01_clock, gclk4_160) = Pclk::enable(tokens.pclks.tcc0_tcc1, gclk4_160);
+        let tcc01_clock_compat = tcc01_clock.into();
+        // Much better resolution to run this at 100Mhz vs 160Mhz
+        let (tcc23_clock, gclk0_100) = Pclk::enable(tokens.pclks.tcc2_tcc3, gclk0_100);
+
+        // -- TCC Solenoid init  --
+        let sol_tcc = TccSol::new(
+            device.tcc1,
+            device.tcc2,
+            &tcc01_clock_compat,
+            &tcc23_clock.into(),
+            pins.tcc_pwm.into(),
+            pins.tcc_cutoff.into(),
+            &mut mclk,
+        );
+
         // -- TLE8242 init --
 
         // Init SPI
@@ -340,12 +348,12 @@ mod app {
             cs: pins.tle_cs.into(),
             led: pins.led_tle_act.into(),
         };
-        let (tcc0_clock, gclk4_160) = Pclk::enable(tokens.pclks.tcc0_tcc1, gclk4_160);
+
         let tle8242: Tle8242<dmac::Ch0, dmac::Ch1> = Tle8242::new(
             tle8242_pins,
             spi_fut_dma,
             &mut mclk,
-            &tcc0_clock.into(),
+            &tcc01_clock_compat,
             device.tcc0,
         );
 
@@ -444,6 +452,7 @@ mod app {
                 wdt,
                 can_layer,
                 slave_can: SlaveCan::new(),
+                soltcc: sol_tcc,
             },
             Resources {
                 adc_data,
@@ -582,7 +591,7 @@ mod app {
         }
     }
 
-    #[task(priority = 2, shared=[can_layer, slave_can])]
+    #[task(priority = 2, shared=[can_layer, slave_can, soltcc])]
     async fn gearbox_task(
         mut cx: gearbox_task::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
@@ -621,13 +630,16 @@ mod app {
                 solenoid_controller.set_mpc_current(mpc_req).await;
                 solenoid_controller.set_spc_current(spc_req).await;
 
+                cx.shared.soltcc.lock(|tcc| {
+                    solenoid_controller.set_tcc_pwm((tcc_req as u16) << 8, tcc);
+                });
+
                 // Actuate solenoids
                 // Todo - Only do delay and second query if first failed
                 let mut rpt = SolenoidReport::ZERO;
                 let spc_current = solenoid_controller.read_spc_current();
                 let mpc_current = solenoid_controller.read_mpc_current();
                 solenoid_controller.update_current_readings().await;
-                //defmt::println!("{} {}", spc_current, mpc_current);
 
                 rpt.set_mpc_curr(mpc_current.swap_bytes());
                 rpt.set_spc_curr(spc_current.swap_bytes());
@@ -683,6 +695,25 @@ mod app {
                 _ => {}
             }
         }
+    }
+
+    // -- Interrupts for TCC2 for the TCC Solenoid -- //
+    //    These have the HIGHEST priority to keep     //
+    //    the TCC solenoid waveform accurate!         //
+
+    #[task(priority = 3, binds=TCC2_OTHER, shared=[soltcc])]
+    fn tcc2_ovf(mut cx: tcc2_ovf::Context) {
+        cx.shared.soltcc.lock(|lck| lck.on_tcc_ovf());
+    }
+
+    #[task(priority = 3, binds=TCC2_MC0, shared=[soltcc])]
+    fn tcc2_mc0(mut cx: tcc2_mc0::Context) {
+        cx.shared.soltcc.lock(|lck| lck.on_tcc_mc0());
+    }
+
+    #[task(priority = 3, binds=TCC2_MC1, shared=[soltcc])]
+    fn tcc2_mc1(mut cx: tcc2_mc1::Context) {
+        cx.shared.soltcc.lock(|lck| lck.on_tcc_mc1());
     }
 }
 
