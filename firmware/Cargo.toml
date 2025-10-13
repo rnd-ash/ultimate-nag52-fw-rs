@@ -45,6 +45,8 @@ bitbybit = "1.4.0"
 arbitrary-int = "2.0.0"
 libm = "0.2.15"
 bitflags = "2.9.4"
+atsamd-hal-macros = "0.3.0"
+seq-macro = "0.3.6"
 
 [build-dependencies]
 candb_codegen = { path = "../candb_codegen" }

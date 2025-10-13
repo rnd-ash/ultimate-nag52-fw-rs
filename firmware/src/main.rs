@@ -35,6 +35,7 @@ use crate::diag::dev_mode::EgsDeviceMode;
 
 pub mod can;
 pub mod diag;
+pub mod hal_extension;
 pub mod maths;
 pub mod sensors;
 pub mod solenoids;
