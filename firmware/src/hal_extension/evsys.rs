@@ -25,51 +25,42 @@
 //! 3. Pass a channel into a generator peripheral to enable it to output to the provided channel
 //! 4. Pass the channel into the receiving peripheral to complete wiring the peripheral up.
 //!
-//! ### Example setup using TC pulse counter and EIC
-//! ```no_run
-//! // Splitting EIC channels (See EIC peripheral)
-//! let eic_channels = Eic::new(&mut peripherals.mclk, eic_clock, peripherals.eic).split();
-//! let speed_sensor: Pin<_, PullDownInterrupt> = pins.speed_sensor.into();
-//! let extint_speed_sensor = eic_channels.0.with_pin(speed_sensor); // Our generator channel
-//!
-//! // Initialize the evsys controller and split into channels
-//! let evsys_channels = EvSysController::new(&mut peripherals.mclk, evsys_clock, peripherals.evsys).split();
-//! // Take a channel and provide it to an EIC channel to generate our events
-//! let evsys_chan0 = extint_speed_sensor.enable_evsys_src(evsys_channels.0); // Channel with generator wired up
-//!
-//! // Create our pulse counter, using the evsys channel to provide the trigger to count!
-//! let pc_settings = CounterSettings::default();
-//! let pc_speed_sensor: PulseCounter<Tc2PulseCounter, evsys::Ch0> = PulseCounter::new(cx.device.tc2, &tc2_3_pclk, pc_settings, &mut peripherals.mclk, evsys_chan0);
-//!
-//!
-//! loop {
-//!    let pulses = pc_speed_sensor.count();
-//!    pc_speed_sensor.reset(); // Set pulse counter back to 0 after each read!
-//! }
-//! ```
 //! ## Notes
 //! At the moment, the event system channels will only run using Asynchronous paths,
-//! which is not supported by all receiving peripherals.
-
-use atsamd_hal::pac;
+//! which is not supported by all receiving peripherals. Consult the chip datasheet
+use atsamd_hal::pac::Mclk;
+use atsamd_hal::with_num_channels;
+use atsamd_hal_macros::hal_cfg;
 use core::marker::PhantomData;
-
-use pac::{Evsys, Mclk};
+use atsamd_hal::pac::Evsys;
 use seq_macro::seq;
 
 pub trait Status {}
 
-pub enum Uninitialized {}
+pub struct Uninitialized {}
 impl Status for Uninitialized {}
 
-pub enum GenReady {}
-impl Status for GenReady {}
+pub struct GenReady<GEN: EvSysGenerator> {
+    generator: PhantomData<GEN>,
+}
+impl<GEN: EvSysGenerator> Status for GenReady<GEN> {}
 
-pub enum Ready {}
-impl Status for Ready {}
+pub struct Ready<GEN: EvSysGenerator, USR: EvSysUser> {
+    generator: PhantomData<GEN>,
+    user: PhantomData<USR>,
+}
+impl<GEN: EvSysGenerator, USR: EvSysUser> Status for Ready<GEN, USR> {}
 
 pub trait ChId {
     const ID: usize;
+}
+
+pub trait EvSysGenerator {
+    const GENERATOR_ID: usize;
+}
+
+pub trait EvSysUser {
+    const USER_ID: usize;
 }
 
 pub struct EvSysChannel<Id: ChId, S: Status> {
@@ -103,24 +94,24 @@ impl<Id: ChId, S: Status> EvSysChannel<Id, S> {
 
 // Methods that can only be used on a channel that is uninitialized
 impl<Id: ChId> EvSysChannel<Id, Uninitialized> {
-    pub fn register_generator(mut self, generator_id: u8) -> EvSysChannel<Id, GenReady> {
-        self.generator_id = generator_id;
+    pub fn register_generator<GEN: EvSysGenerator>(mut self) -> EvSysChannel<Id, GenReady<GEN>> {
+        self.generator_id = GEN::GENERATOR_ID as u8;
         self.change_status()
     }
 }
 
 // Methods that can only be used on a channel with just a connected generator
-impl<Id: ChId> EvSysChannel<Id, GenReady> {
+impl<Id: ChId, GEN: EvSysGenerator> EvSysChannel<Id, GenReady<GEN>> {
     pub fn remove_generator(mut self) -> EvSysChannel<Id, Uninitialized> {
         self.generator_id = 0;
         self.change_status()
     }
 
-    pub fn register_user(self, user_id: usize) -> EvSysChannel<Id, Ready> {
+    pub fn register_user<USR: EvSysUser>(self) -> EvSysChannel<Id, Ready<GEN, USR>> {
         // Now wire up the generator
         // Multiplexor MUST be wired before the channel
         self.evsys
-            .user(user_id)
+            .user(USR::USER_ID)
             .write(|w| unsafe { w.channel().bits(Id::ID as u8 + 1) }); // +1 since 0 means no channel
 
         self.evsys.channels(Id::ID as usize).channel().write(|w| {
@@ -133,14 +124,14 @@ impl<Id: ChId> EvSysChannel<Id, GenReady> {
 }
 
 // Methods that can only be used on a channel that has both ends connected
-impl<Id: ChId> EvSysChannel<Id, Ready> {
-    pub fn deregister_user(self, user_id: usize) -> EvSysChannel<Id, GenReady> {
+impl<Id: ChId, GEN: EvSysGenerator, USR: EvSysUser> EvSysChannel<Id, Ready<GEN, USR>> {
+    pub fn deregister_user(self) -> EvSysChannel<Id, GenReady<GEN>> {
         // Unhook the channel generator
         let reg = self.evsys.channels(Id::ID as usize);
         reg.channel().reset();
         // Then unhook the user
         self.evsys
-            .user(user_id)
+            .user(USR::USER_ID)
             .write(|w| unsafe { w.channel().bits(0) });
         self.change_status()
     }
@@ -148,11 +139,11 @@ impl<Id: ChId> EvSysChannel<Id, Ready> {
 
 /// Event system controller peripheral
 pub struct EvSysController {
-    evsys: pac::Evsys,
+    evsys: atsamd_hal::pac::Evsys,
 }
 
 impl EvSysController {
-    pub fn new(mclk: &mut Mclk, evsys: pac::Evsys) -> Self {
+    pub fn new(mclk: &mut Mclk, evsys: atsamd_hal::pac::Evsys) -> Self {
         mclk.apbbmask().write(|w| w.evsys_().set_bit()); // Enable EVSYS clock
         evsys.ctrla().write(|w| w.swrst().set_bit());
         Self { evsys }
