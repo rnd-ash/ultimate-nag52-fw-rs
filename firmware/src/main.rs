@@ -86,11 +86,19 @@ mod app {
         can::{
             data::slave_mode::SolenoidControl,
             egs52::Egs52Can,
-            slave::{SlaveCan, SolenoidReport},
+            input_output::{CanRxSignals, CanTxSignals},
+            slave::{FullReport, SensorReport, SlaveCan, SolenoidReport},
             CanLayer, CanLayerTy,
         },
         diag::KwpServer,
-        sensors::{AdcData, AdcPins},
+        hal_extension::evsys,
+        sensors::{
+            speed_sensors::{
+                self, init_speed_sensor, AllSpeedSensors, Ext1RpmPc, Ext2RpmPc, IntN2RpmPc,
+                IntN3RpmPc,
+            },
+            AdcData, AdcPins, SensorData,
+        },
         solenoids::{
             tcc_sol::TccSol,
             tle8242::{Tle8242, Tle8242Pins, TLE_SPI_BAUD},
@@ -102,6 +110,8 @@ mod app {
         can::Dependencies,
         clock::v2::{pclk, types::Can0},
         dmac::{self, DmaController, PriorityLevel},
+        ehal::digital::OutputPin,
+        eic::Eic,
         fugit::HertzU32,
         serial_number,
         usb::{
@@ -130,6 +140,7 @@ mod app {
         message::Raw,
         messageram::SharedMemory,
     };
+    use rtic::mutex;
     use rtic_sync::{arbiter::Arbiter, signal::Signal};
     use usbd_serial::{DefaultBufferStore, SerialPort, USB_CLASS_CDC};
 
@@ -138,6 +149,7 @@ mod app {
     #[local]
     struct Resources {
         adc_data: AdcData,
+        speed_sensors: AllSpeedSensors,
 
         isotp_isr: IsoTpInterruptHandler<'static, Can0, Capacities, ISOTP_BUF_SIZE>,
         isotp_thread: IsotpConsumer<'static, Can0, Capacities, ISOTP_BUF_SIZE>,
@@ -164,6 +176,7 @@ mod app {
 
         slave_can: SlaveCan,
         soltcc: TccSol,
+        sensor_data: SensorData,
     }
 
     #[init(local = [
@@ -201,6 +214,8 @@ mod app {
         //
         //     OSCULP(32Khz)
         //     ├── RTIC OS Monotonic
+        //     ├── GCLK 5 (32Khz)
+        //     │   └── EIC
         //     └── Watchdog (2 sec timeout)
         //
         //     DFLL(48Mhz)
@@ -217,9 +232,9 @@ mod app {
         //     V       │   ├── ADC0
         //     E       │   ├── ADC1
         //     R       │   ├── SERCOM(s)
-        //     Y       │   └── EIC
+        //     Y       │   └── TC0..4
         //     │       └── GCLK4(160Mhz)
-        //     |           └── TCC0
+        //     │           └── TCC0
         //     └── GCLK6 (48Mhz)
         //         └── USB
 
@@ -258,7 +273,13 @@ mod app {
 
         // Enable the 32Khz clock and start the RTIC Monotonic driver
         let (osculp32k, _) = OscUlp32k::enable(tokens.osculp32k.osculp32k, clocks.osculp32k_base);
-        let _ = RtcOsc::enable(tokens.rtcosc, osculp32k);
+        let (rtc, osc) = RtcOsc::enable(tokens.rtcosc, osculp32k);
+
+        // Low speed GCLK
+        let (gclk5, _osc) = Gclk::from_source(tokens.gclks.gclk5, osc);
+        let gclk5_32k = gclk5.enable();
+
+        // Start RTIC system
         Mono::start(device.rtc);
 
         // Setup the systick timer to generate an interrupt at 10Hz, this will be
@@ -295,6 +316,13 @@ mod app {
             pclk_adc0,
             pclk_adc1,
         );
+
+        // Event system and RPM sensor setup
+        let evsys_channels = evsys::EvSysController::new(&mut mclk, device.evsys).split();
+        let (pclk_evsys, _gclk5_32k) = Pclk::enable(tokens.pclks.eic, gclk5_32k);
+        let mut eic = Eic::new(&mut mclk, &pclk_evsys.into(), device.eic);
+        //eic.switch_to_osc32k(&rtc);
+        let eic_channels = eic.split();
 
         // DMA Init (SPI + I2C Requires this)
         let dmac = DmaController::init(device.dmac, &mut device.pm);
@@ -360,6 +388,54 @@ mod app {
 
         let solenoid_io = SolenoidControler::new(tle8242, pins.sol_pwr_en.into());
 
+        // Enable sensor power supply (Testing)
+        pins.sensor_pwr_en
+            .into_push_pull_output()
+            .set_high()
+            .unwrap();
+
+        // Speed sensors init
+        let (pclk_tc01, gclk3_80) = Pclk::enable(tokens.pclks.tc0_tc1, gclk3_80);
+        let (pclk_tc23, _gclk3_80) = Pclk::enable(tokens.pclks.tc2_tc3, gclk3_80);
+
+        let n2_pcnt: IntN2RpmPc = init_speed_sensor(
+            pins.rpm_n2,
+            eic_channels.0,
+            evsys_channels.0,
+            &mut mclk,
+            device.tc0,
+            &pclk_tc01,
+        );
+
+        let n3_pcnt: IntN3RpmPc = init_speed_sensor(
+            pins.rpm_n3,
+            eic_channels.14,
+            evsys_channels.1,
+            &mut mclk,
+            device.tc1,
+            &pclk_tc01,
+        );
+
+        let ext_1_pcnt: Ext1RpmPc = init_speed_sensor(
+            pins.rpm_1,
+            eic_channels.8,
+            evsys_channels.2,
+            &mut mclk,
+            device.tc2,
+            &pclk_tc23,
+        );
+
+        let ext_2_pcnt: Ext2RpmPc = init_speed_sensor(
+            pins.rpm_2,
+            eic_channels.6,
+            evsys_channels.3,
+            &mut mclk,
+            device.tc3,
+            &pclk_tc23,
+        );
+
+        let all_spd_sensors = AllSpeedSensors::new(n2_pcnt, n3_pcnt, ext_1_pcnt, ext_2_pcnt);
+
         // -- CAN init --
         let (clk_can, gclk2_40) = Pclk::enable(tokens.pclks.can0, gclk2_40);
         let (can0_deps, gclk2_40) = Dependencies::new(
@@ -400,7 +476,7 @@ mod app {
         );
 
         // Init USB
-        let (usb_clock, gclk2_48) = Pclk::enable(tokens.pclks.usb, gclk6_48);
+        let (usb_clock, _gclk2_48) = Pclk::enable(tokens.pclks.usb, gclk6_48);
         let usb_bus = UsbBus::new(
             &(usb_clock.into()),
             &mut mclk,
@@ -454,9 +530,11 @@ mod app {
                 can_layer,
                 slave_can: SlaveCan::new(),
                 soltcc: sol_tcc,
+                sensor_data: SensorData::default(),
             },
             Resources {
                 adc_data,
+                speed_sensors: all_spd_sensors,
                 can0_fifo0: can.rx_fifo_0,
                 can0_interrupts: line0_interrupts,
                 isotp_isr,
@@ -473,8 +551,8 @@ mod app {
         let mut syst = unsafe { cortex_m::Peripherals::steal().SYST };
         loop {
             // Stop interrupts from context switch
-            cortex_m::interrupt::disable();
             syst.clear_current();
+            cortex_m::interrupt::disable();
             syst.enable_counter();
             // Wait for something to wake up the CPU
             wfi();
@@ -582,17 +660,21 @@ mod app {
         });
     }
 
-    #[task(priority = 1, local=[adc_data], shared=[wdt])]
+    #[task(priority = 1, local=[adc_data, speed_sensors], shared=[wdt, sensor_data])]
     async fn adc_task(mut cx: adc_task::Context) {
         loop {
             let now = Mono::now();
-            cx.local.adc_data.update().await;
+            let (n2, n3) = cx.local.speed_sensors.update();
+            let mut data = cx.local.adc_data.update().await;
+            data.n2_rpm = n2;
+            data.n3_rpm = n3;
             cx.shared.wdt.lock(|wdt| wdt.feed());
+            cx.shared.sensor_data.lock(|l| *l = data);
             Mono::delay_until(now + 20u64.millis()).await;
         }
     }
 
-    #[task(priority = 2, shared=[can_layer, slave_can, soltcc])]
+    #[task(priority = 2, shared=[can_layer, slave_can, soltcc, sensor_data])]
     async fn gearbox_task(
         mut cx: gearbox_task::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
@@ -600,23 +682,24 @@ mod app {
     ) {
         // Gearbox has started, set device mode
         DEVICE_MODE.store(EgsDeviceMode::SLAVE.bits(), Ordering::Relaxed);
+        let mut can_input = CanRxSignals::default();
+        let mut can_output = CanTxSignals::default();
         loop {
             let now = Mono::now();
             let mode = EgsDeviceMode::from_bits_retain(DEVICE_MODE.load(Ordering::Relaxed));
+            let sensor_data = cx.shared.sensor_data.lock(|l| l.clone());
 
-            // Process inputs
-            //cx.shared.can_layer.lock(|lck| lck.read_signals());
-
-            // TODO GEARBOX STUFF
-
-            // Set outputs
-            //let mut can = can_tx.access().await;
-            //let _ = cx.shared.can_layer.lock(|lck| {
-            //    lck.write_signals();
-            //    lck.transmit(&mut can)
-            //});
-
-            if mode.contains(EgsDeviceMode::SLAVE) {
+            if !mode.contains(EgsDeviceMode::SLAVE) {
+                cx.shared
+                    .can_layer
+                    .lock(|lck| lck.read_signals(&mut can_input));
+                // Gearbox stuff
+                let mut can = can_tx.access().await;
+                let _ = cx.shared.can_layer.lock(|lck| {
+                    lck.write_signals(&can_output);
+                    lck.transmit(&mut can)
+                });
+            } else {
                 // Slave mode has special logic
                 use can::CanLayer;
                 let mut control_frame = SolenoidControl::ZERO;
@@ -630,6 +713,10 @@ mod app {
 
                 solenoid_controller.set_mpc_current(mpc_req).await;
                 solenoid_controller.set_spc_current(spc_req).await;
+                solenoid_controller.set_y3(control_frame.y_3_en()).await;
+                solenoid_controller.set_y4(control_frame.y_4_en()).await;
+                solenoid_controller.set_y5(control_frame.y_5_en()).await;
+                solenoid_controller.update_task().await;
 
                 cx.shared.soltcc.lock(|tcc| {
                     solenoid_controller.set_tcc_pwm((tcc_req as u16) << 8, tcc);
@@ -638,16 +725,34 @@ mod app {
                 // Actuate solenoids
                 // Todo - Only do delay and second query if first failed
                 let mut rpt = SolenoidReport::ZERO;
+                let mut sensor_rpt = SensorReport::ZERO;
                 let spc_current = solenoid_controller.read_spc_current();
                 let mpc_current = solenoid_controller.read_mpc_current();
-                solenoid_controller.update_current_readings().await;
 
                 rpt.set_mpc_curr(mpc_current.swap_bytes());
                 rpt.set_spc_curr(spc_current.swap_bytes());
+                rpt.set_y_3_on(solenoid_controller.read_y3_current() > 100);
+                rpt.set_y_4_on(solenoid_controller.read_y4_current() > 100);
+                rpt.set_y_5_on(solenoid_controller.read_y5_current() > 100);
+
+                match sensor_data.tft {
+                    sensors::TftSensorReading::ParkingLock => sensor_rpt.set_tft(0xFF),
+                    sensors::TftSensorReading::Temperature(temp_c) => {
+                        sensor_rpt.set_tft((temp_c + 50) as u8);
+                    }
+                }
+                sensor_rpt.set_vbatt((sensor_data.vbatt / 100) as u8);
+                sensor_rpt.set_n_2_raw(sensor_data.n2_rpm*50);
+                sensor_rpt.set_n_3_raw(sensor_data.n3_rpm*50);
+
+                let fr = FullReport {
+                    solenoids: rpt,
+                    sensors: sensor_rpt,
+                };
 
                 let mut can = can_tx.access().await;
                 let _ = cx.shared.slave_can.lock(|lck| {
-                    lck.write_signals(&rpt);
+                    lck.write_signals(&fr);
                     lck.transmit(&mut can)
                 });
             }

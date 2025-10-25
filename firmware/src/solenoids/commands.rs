@@ -84,7 +84,7 @@ macro_rules! tle_message {
 
 /// TLE Channel number
 #[bitbybit::bitenum(u3, exhaustive = true)]
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(defmt::Format, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TleChannel {
     /// Channel 0 (OUT0 - Pin 60)
     _0 = 0,

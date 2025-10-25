@@ -45,6 +45,8 @@ use bsp::{TccCutoff, TccPwm};
 
 /// TCC channel for the PWM wave
 const TCC1_CHANNEL_PWM: Channel = Channel::_0;
+/// TCC solenoid resistance (Ohms)
+const RESISTANCE_TCC_SOL: f32 = 2.5;
 
 /// Nanoseconds per Hydraulic PWM Period
 const NS_FULL_PERIOD: u32 = 10_000_000;
@@ -53,7 +55,7 @@ const NS_FULL_PERIOD: u32 = 10_000_000;
 ///
 /// A thin wrapper around TCC2 for adding multiple
 /// watchpoints which are required for the 3 phase
-/// cointrol of the torque converter solenoid.
+/// control of the torque converter solenoid.
 pub struct TccTcc {
     inner: Tcc2,
     // Cycles for a full 10ms window
@@ -78,8 +80,11 @@ impl TccTcc {
         unsafe { tcc.cc(1).modify(|_, w| w.cc().bits(u32::MAX)) };
         // Enable our interrupts
         tcc.intenset().write(|s| {
+            // For phase 0->1
             s.mc0().set_bit();
+            // For phase 1->2
             s.mc1().set_bit();
+            // For end of cycle
             s.ovf().set_bit()
         });
         // Period value dicates the max of the counter
@@ -131,7 +136,6 @@ pub struct TccSol {
     tcctcc: TccTcc,
     max_duty: u32,
     zener_pin: TccCutoff,
-
     /// Phase 1 timer watchpoint value
     phase_1_count: u32,
     /// Phase 2 timer watchpoint value
@@ -171,6 +175,9 @@ impl TccSol {
         }
     }
 
+    /// Writes Hydraulic PWM to the solenoid.
+    ///
+    /// * pwm - Hydraulic PWM duty, in the range 0 - [u16::MAX]
     pub fn write_tcc_sol(&mut self, pwm: u16) {
         if pwm < 3000 {
             // Solid off
@@ -210,6 +217,7 @@ impl TccSol {
 
     /// On a full period elapsed interrupt
     /// (Overflow)
+    #[inline]
     pub fn on_tcc_ovf(&mut self) {
         // Clear Interrupt flag
         self.tcctcc.inner.intflag().write(|w| w.ovf().set_bit());
@@ -221,6 +229,7 @@ impl TccSol {
     }
 
     /// On P1 time (Transition to P2)
+    #[inline]
     pub fn on_tcc_mc0(&mut self) {
         // Clear Interrupt flag
         self.tcctcc.inner.intflag().write(|w| w.mc0().set_bit());
@@ -233,6 +242,7 @@ impl TccSol {
     }
 
     /// On P2 time (Transition to P0)
+    #[inline]
     pub fn on_tcc_mc1(&mut self) {
         // Clear Interrupt flag
         self.tcctcc.inner.intflag().write(|w| w.mc1().set_bit());

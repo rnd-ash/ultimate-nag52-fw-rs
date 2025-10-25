@@ -1,4 +1,5 @@
-use atsamd_hal::adc::{CpuVoltageSource, SampleCount};
+use atsamd_hal::adc::{AdcPin, CpuVoltageSource, SampleCount};
+use atsamd_hal::gpio::{AnyPin, PA00, PB03};
 use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::{
     adc::{
@@ -16,10 +17,12 @@ use atsamd_hal::{
     pac::{self, Supc},
 };
 use bsp::{AccelMSense, AccelPSense, SolPwrSense, Tft, VBattSense, VSensorSense, VsolSense};
-use defmt::info;
+use defmt::{info, println};
 
 use crate::maths::FirstOrderAverage;
 use crate::{maths, Adc0Irqs, Adc1Irqs, Mono};
+
+pub mod speed_sensors;
 
 // All values here are from 0-4095 (12bit ADC reading)
 pub struct AnalogSensors {
@@ -39,6 +42,7 @@ pub struct AnalogSensors {
     vsol_sense: FirstOrderAverage<u16, 10>,
 }
 
+
 pub struct AdcPins {
     pub vbatt_sense: VBattSense,
     pub vsensor_sense: VSensorSense,
@@ -47,6 +51,15 @@ pub struct AdcPins {
     pub tft: Tft,
     pub sol_pwr_sense: SolPwrSense,
     pub vsol_sense: VsolSense,
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct SensorData {
+    pub tft: TftSensorReading,
+    /// Units: millivolts
+    pub vbatt: u16,
+    pub n2_rpm: u16,
+    pub n3_rpm: u16,
 }
 
 pub struct AdcData {
@@ -103,7 +116,7 @@ impl AdcData {
         (v_out / div) as u16
     }
 
-    pub async fn update(&mut self) {
+    pub async fn update(&mut self) -> SensorData {
         let now = Mono::now().duration_since_epoch().to_micros();
         let mcu_core_supply = self.adc0.read_cpu_voltage(CpuVoltageSource::Core).await;
         // What 4095 means from ADC
@@ -153,11 +166,18 @@ impl AdcData {
         //    mcu_core_supply,
         //    mcu_io_supply
         //);
+        SensorData {
+            tft: tft_reading,
+            vbatt: board_supply,
+            n2_rpm: 0,
+            n3_rpm: 0,
+        }
     }
 }
 
-#[derive(defmt::Format, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub enum TftSensorReading {
+    #[default]
     ParkingLock,
     Temperature(i16),
 }

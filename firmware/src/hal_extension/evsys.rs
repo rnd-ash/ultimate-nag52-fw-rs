@@ -28,11 +28,12 @@
 //! ## Notes
 //! At the moment, the event system channels will only run using Asynchronous paths,
 //! which is not supported by all receiving peripherals. Consult the chip datasheet
+use atsamd_hal::pac::Evsys;
 use atsamd_hal::pac::Mclk;
 use atsamd_hal::with_num_channels;
 use atsamd_hal_macros::hal_cfg;
 use core::marker::PhantomData;
-use atsamd_hal::pac::Evsys;
+use defmt::println;
 use seq_macro::seq;
 
 pub trait Status {}
@@ -56,7 +57,7 @@ pub trait ChId {
 }
 
 pub trait EvSysGenerator {
-    const GENERATOR_ID: usize;
+    const GENERATOR_ID: u8;
 }
 
 pub trait EvSysUser {
@@ -67,7 +68,6 @@ pub struct EvSysChannel<Id: ChId, S: Status> {
     evsys: core::mem::ManuallyDrop<Evsys>,
     _id: PhantomData<Id>,
     _state: PhantomData<S>,
-    generator_id: u8,
 }
 
 // Create a new Uninitialized channel
@@ -76,7 +76,6 @@ fn new_evsys_channel<Id: ChId>(evsys: Evsys) -> EvSysChannel<Id, Uninitialized> 
         evsys: core::mem::ManuallyDrop::new(evsys),
         _id: PhantomData,
         _state: PhantomData,
-        generator_id: 0,
     }
 }
 
@@ -87,23 +86,20 @@ impl<Id: ChId, S: Status> EvSysChannel<Id, S> {
             evsys: self.evsys,
             _id: PhantomData,
             _state: PhantomData,
-            generator_id: self.generator_id,
         }
     }
 }
 
 // Methods that can only be used on a channel that is uninitialized
 impl<Id: ChId> EvSysChannel<Id, Uninitialized> {
-    pub fn register_generator<GEN: EvSysGenerator>(mut self) -> EvSysChannel<Id, GenReady<GEN>> {
-        self.generator_id = GEN::GENERATOR_ID as u8;
+    pub fn register_generator<GEN: EvSysGenerator>(self) -> EvSysChannel<Id, GenReady<GEN>> {
         self.change_status()
     }
 }
 
 // Methods that can only be used on a channel with just a connected generator
 impl<Id: ChId, GEN: EvSysGenerator> EvSysChannel<Id, GenReady<GEN>> {
-    pub fn remove_generator(mut self) -> EvSysChannel<Id, Uninitialized> {
-        self.generator_id = 0;
+    pub fn remove_generator(self) -> EvSysChannel<Id, Uninitialized> {
         self.change_status()
     }
 
@@ -117,7 +113,7 @@ impl<Id: ChId, GEN: EvSysGenerator> EvSysChannel<Id, GenReady<GEN>> {
         self.evsys.channels(Id::ID as usize).channel().write(|w| {
             w.path().asynchronous();
             w.edgsel().no_evt_output();
-            unsafe { w.evgen().bits(self.generator_id) }
+            unsafe { w.evgen().bits(GEN::GENERATOR_ID) }
         });
         self.change_status()
     }
@@ -144,7 +140,7 @@ pub struct EvSysController {
 
 impl EvSysController {
     pub fn new(mclk: &mut Mclk, evsys: atsamd_hal::pac::Evsys) -> Self {
-        mclk.apbbmask().write(|w| w.evsys_().set_bit()); // Enable EVSYS clock
+        mclk.apbbmask().modify(|_, w| w.evsys_().set_bit()); // Enable EVSYS clock
         evsys.ctrla().write(|w| w.swrst().set_bit());
         Self { evsys }
     }

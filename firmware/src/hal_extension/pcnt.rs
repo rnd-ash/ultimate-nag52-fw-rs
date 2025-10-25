@@ -242,11 +242,11 @@ macro_rules! tc_pulse_counter {
             type Instance = atsamd_hal::pac::$TC;
 
             fn enable_mclk(mclk: &mut Mclk) {
-                mclk.$apmask().write(|w| w.$mclk().set_bit());
+                mclk.$apmask().modify(|_, w| w.$mclk().set_bit());
             }
 
             fn disable_mclk(mclk: &mut Mclk) {
-                mclk.$apmask().write(|w| w.$mclk().clear_bit());
+                mclk.$apmask().modify(|_, w| w.$mclk().clear_bit());
             }
         }
         )+

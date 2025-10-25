@@ -5,7 +5,7 @@ use mcan::embedded_can;
 use crate::{
     can::{
         egs52::Egs52Can,
-        input_output::{CanInput, CanOutput},
+        input_output::{CanRxSignals, CanTxSignals},
     },
     Mono,
 };
@@ -109,11 +109,11 @@ impl CanLayerTy {
         self.as_can_layer_mut().on_frame(id, data);
     }
 
-    pub fn read_signals(&self, dest: &mut CanOutput) {
+    pub fn read_signals(&self, dest: &mut CanRxSignals) {
         self.as_can_layer().read_signals(dest);
     }
 
-    pub fn write_signals(&mut self, signals: &CanInput) {
+    pub fn write_signals(&mut self, signals: &CanTxSignals) {
         self.as_can_layer_mut().write_signals(signals);
     }
 
@@ -124,13 +124,13 @@ impl CanLayerTy {
         self.as_can_layer().transmit(can_tx)
     }
 
-    fn as_can_layer(&self) -> &impl CanLayer<CanInput, CanOutput> {
+    fn as_can_layer(&self) -> &impl CanLayer<CanTxSignals, CanRxSignals> {
         match self {
             CanLayerTy::Egs52(egs52_can) => egs52_can,
         }
     }
 
-    fn as_can_layer_mut(&mut self) -> &mut impl CanLayer<CanInput, CanOutput> {
+    fn as_can_layer_mut(&mut self) -> &mut impl CanLayer<CanTxSignals, CanRxSignals> {
         match self {
             CanLayerTy::Egs52(egs52_can) => egs52_can,
         }

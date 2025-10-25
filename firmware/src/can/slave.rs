@@ -10,38 +10,47 @@ use crate::{
 
 pub struct SlaveCan {
     sol_rpt: SolenoidReport,
+    sensor_rpt: SensorReport,
     sol_ctrl: RxFrame<SolenoidControl>,
+}
+
+pub struct FullReport {
+    pub solenoids: SolenoidReport,
+    pub sensors: SensorReport,
 }
 
 impl SlaveCan {
     pub fn new() -> Self {
         let s = Self {
             sol_rpt: SolenoidReport::ZERO,
+            sensor_rpt: SensorReport::ZERO,
             sol_ctrl: rxframe_default!(SolenoidControl),
         };
         s
     }
 }
 
-impl CanLayer<SolenoidReport, SolenoidControl> for SlaveCan {
+impl CanLayer<FullReport, SolenoidControl> for SlaveCan {
     fn transmit(
         &self,
         can_tx: &mut mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>,
     ) -> atsamd_hal::nb::Result<(), mcan::tx_buffers::Error> {
         can_tx.transmit_queued(self.sol_rpt.as_tx_can_msg())?;
+        can_tx.transmit_queued(self.sensor_rpt.as_tx_can_msg())?;
         Ok(())
     }
 
     fn read_signals(&self, dest: &mut SolenoidControl) {
-        if let Some(frame) = self.sol_ctrl.get(100)  {
+        if let Some(frame) = self.sol_ctrl.get(100) {
             *dest = frame;
         } else {
             *dest = SolenoidControl::ZERO
         }
     }
 
-    fn write_signals(&mut self, sigs: &SolenoidReport) {
-        self.sol_rpt = *sigs;
+    fn write_signals(&mut self, sigs: &FullReport) {
+        self.sol_rpt = sigs.solenoids;
+        self.sensor_rpt = sigs.sensors;
     }
 
     fn on_frame(&mut self, id: mcan::embedded_can::Id, data: &[u8; 8]) {

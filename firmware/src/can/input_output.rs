@@ -1,5 +1,5 @@
-#[derive(Copy, Clone, defmt::Format)]
-pub struct CanInput {}
+#[derive(Copy, Clone, defmt::Format, Default)]
+pub struct CanTxSignals {}
 
-#[derive(Copy, Clone, defmt::Format)]
-pub struct CanOutput {}
+#[derive(Copy, Clone, defmt::Format, Default)]
+pub struct CanRxSignals {}

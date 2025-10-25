@@ -191,7 +191,6 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
             cfg_fault_msg.set_cmx(7 - idx, channel.mode.to_ctrl_mode());
         }
         // Send our fault configuration message
-        println!("{:032b} <- DR", cfg_fault_msg.raw_value());
         self.xfer(cfg_fault_msg).await;
         // Wait needed for autoZero to work
         Mono::delay(1u64.micros()).await;
@@ -219,9 +218,8 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
     /// * percentage - Value from 0.0 to 1.0 representing PWM duty
     pub async fn set_channel_pwm(&mut self, channel: TleChannel, percentage: f32) {
         if let Some((_, props)) = self.config.channel_settings[channel as usize] {
-            if let Mode::Pwm { divm, divn } = props.mode {
-                let duty = percentage * (divm.get_value(false) as f32 * divn as f32);
-                println!("{} -> {}", percentage, duty as u32);
+            if let Mode::Pwm { divm: _, divn } = props.mode {
+                let duty = percentage * (32.0 * divn as f32);
                 let req_msg = PwmDutyCycle::new_with_id()
                     .with_write(true)
                     .with_channel_id(channel)

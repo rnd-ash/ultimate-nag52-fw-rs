@@ -1,11 +1,20 @@
-use atsamd_hal::{dmac, ehal::digital::OutputPin, time::Hertz};
+use atsamd_hal::{
+    dmac::{self, ChId},
+    ehal::digital::OutputPin,
+    rtic_time::Monotonic,
+    time::Hertz,
+};
 use bsp::SolPwrEn;
+use defmt::println;
 
-use crate::solenoids::{
-    commands::{ShortToBatThreshold, TleChannel},
-    solenoid_ctrl::{DitherSettings, Mode},
-    tcc_sol::TccSol,
-    tle8242::{ChannelProps, Tle8242, TleConfiguration, R_SENSE_VAL, TLE8242_CLK_FREQ},
+use crate::{
+    solenoids::{
+        commands::{ShortToBatThreshold, TleChannel},
+        solenoid_ctrl::{DitherSettings, Mode},
+        tcc_sol::TccSol,
+        tle8242::{ChannelProps, Tle8242, TleConfiguration, R_SENSE_VAL, TLE8242_CLK_FREQ},
+    },
+    Mono,
 };
 
 pub mod commands;
@@ -42,6 +51,20 @@ pub struct SolenoidOutputReq {
     pub on_off_valves: SolenoidOnOffReq,
 }
 
+#[derive(Default, Copy, Clone)]
+pub enum ShiftValveState {
+    #[default]
+    Off,
+    FullOn(u64),
+    HoldOn,
+}
+
+impl ShiftValveState {
+    pub fn is_on(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
 #[derive(Default)]
 pub struct MonitoredOutputs {
     pub spc_current: u16,
@@ -53,6 +76,21 @@ pub struct MonitoredOutputs {
     pub trrs_current: u16,
 }
 
+impl MonitoredOutputs {
+    pub fn set_current(&mut self, chan: TleChannel, val: u16) {
+        match chan {
+            x if x == TLE_CHAN_MPC => self.mpc_current = val,
+            x if x == TLE_CHAN_SPC => self.spc_current = val,
+            x if x == TLE_CHAN_Y3 => self.y3_current = val,
+            x if x == TLE_CHAN_Y4 => self.y4_current = val,
+            x if x == TLE_CHAN_Y5 => self.y5_current = val,
+            x if x == TLE_CHAN_GPIO => self.gpio_current = val,
+            x if x == TLE_CHAN_TRRS => self.trrs_current = val,
+            _ => {}
+        }
+    }
+}
+
 pub struct SolenoidControler<T: dmac::ChId, R: dmac::ChId> {
     tle8242: Tle8242<T, R>,
     pin_sol_pwr_en: SolPwrEn,
@@ -61,6 +99,35 @@ pub struct SolenoidControler<T: dmac::ChId, R: dmac::ChId> {
     all_channels: [TleChannel; 7],
     monitored_currents: MonitoredOutputs,
     last_read_current_channel: usize,
+    // Control of the shift valves
+    y3_state: ShiftValveState,
+    y4_state: ShiftValveState,
+    y5_state: ShiftValveState,
+}
+
+async fn set_binary_valve<I: ChId, O: ChId>(
+    tle8242: &mut Tle8242<I, O>,
+    en: bool,
+    chan: TleChannel,
+    ss_state: &mut ShiftValveState,
+) {
+    if en && !ss_state.is_on() {
+        tle8242.set_channel_pwm(chan, 1.0).await;
+        *ss_state = ShiftValveState::FullOn(Mono::now().duration_since_epoch().to_millis());
+    } else if !en && ss_state.is_on() {
+        tle8242.set_channel_pwm(chan, 0.0).await;
+        *ss_state = ShiftValveState::Off;
+    }
+}
+
+macro_rules! make_binary_valve {
+    ($name:ident, $chan:expr, $field:ident) => {
+        pub async fn $name(&mut self, en: bool) {
+            let tle8242 = &mut self.tle8242;
+            let ss_state = &mut self.$field;
+            set_binary_valve(tle8242, en, $chan, ss_state).await;
+        }
+    };
 }
 
 impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
@@ -81,6 +148,9 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
             ],
             monitored_currents: MonitoredOutputs::default(),
             last_read_current_channel: 0,
+            y3_state: Default::default(),
+            y4_state: Default::default(),
+            y5_state: Default::default(),
         }
     }
 
@@ -136,8 +206,6 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         self.tle8242.init(cfg).await;
     }
 
-    pub async fn update() {}
-
     pub async fn set_spc_current(&mut self, setpoint_ma: u16) {
         if self.last_spc != setpoint_ma {
             let setpoint_val = setpoint_ma as f32 / (320.0 / R_SENSE_VAL) * 2048.0;
@@ -158,29 +226,38 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         }
     }
 
-    pub async fn set_y3_pwm(&mut self, duty: f32) {
-        self.tle8242.set_channel_pwm(TLE_CHAN_Y3, duty).await;
-    }
-
-    pub async fn set_y4_pwm(&mut self, duty: f32) {
-        self.tle8242.set_channel_pwm(TLE_CHAN_Y4, duty).await;
-    }
-
-    pub async fn set_y5_pwm(&mut self, duty: f32) {
-        self.tle8242.set_channel_pwm(TLE_CHAN_Y5, duty).await;
-    }
-
     pub fn set_tcc_pwm(&mut self, duty: u16, sol_tcc: &mut TccSol) {
         sol_tcc.write_tcc_sol(duty);
     }
 
     /// Task is responsible for updating all solenoids on demand,
     /// and monitoring current consumption
-    pub async fn update_task(&mut self) {}
+    pub async fn update_task(&mut self) {
+        let millis = Mono::now().duration_since_epoch().to_millis();
+        // macro to easily update binary valve states
+        macro_rules! update_binary_valve {
+            ($chan:ident, $field:ident, $max_on_time: literal) => {
+                if let ShiftValveState::FullOn(on_ts) = self.$field {
+                    if millis - on_ts > $max_on_time {
+                        // Reduce PWM
+                        self.tle8242.set_channel_pwm($chan, 0.25).await;
+                        self.$field = ShiftValveState::HoldOn;
+                    }
+                }
+            };
+        }
+
+        // Update the valves if the PWM should be lowered
+        update_binary_valve!(TLE_CHAN_Y3, y3_state, 250);
+        update_binary_valve!(TLE_CHAN_Y4, y4_state, 250);
+        update_binary_valve!(TLE_CHAN_Y5, y5_state, 250);
+
+        self.update_current_readings().await;
+    }
 
     pub async fn update_current_readings(&mut self) {
         // Try to read the current channel
-        while let Some(avg) = self
+        if let Some(avg) = self
             .tle8242
             .get_avg_current(self.all_channels[self.last_read_current_channel])
             .await
@@ -188,6 +265,7 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
             // Valid response
             // Parse to mA
             let milliamps = match self.all_channels[self.last_read_current_channel] {
+                // TODO GPIO and TRRS channels
                 TLE_CHAN_MPC | TLE_CHAN_SPC => {
                     // With dither
                     ((avg as f32 / 32768.0) * (320.0 / R_SENSE_VAL)) as u16
@@ -198,7 +276,8 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
                 }
                 _ => 0,
             };
-            //self.channel_currents[self.last_read_current_channel] = milliamps;
+            self.monitored_currents
+                .set_current(self.all_channels[self.last_read_current_channel], milliamps);
             // Cycle to the next channel
             let next_id = (self.last_read_current_channel + 1) % 7;
             self.last_read_current_channel = next_id;
@@ -206,11 +285,29 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         // No response since valid bit is not set - Exit loop
     }
 
-    pub fn read_spc_current(&mut self) -> u16 {
+    pub fn read_spc_current(&self) -> u16 {
         self.monitored_currents.spc_current
     }
 
-    pub fn read_mpc_current(&mut self) -> u16 {
+    pub fn read_mpc_current(&self) -> u16 {
         self.monitored_currents.mpc_current
     }
+
+    pub fn read_y3_current(&self) -> u16 {
+        self.monitored_currents.y3_current
+    }
+
+    pub fn read_y4_current(&self) -> u16 {
+        self.monitored_currents.y4_current
+    }
+
+    pub fn read_y5_current(&self) -> u16 {
+        self.monitored_currents.y5_current
+    }
+
+    // Binary valve manipulations from macro
+
+    make_binary_valve!(set_y3, TLE_CHAN_Y3, y3_state);
+    make_binary_valve!(set_y4, TLE_CHAN_Y4, y4_state);
+    make_binary_valve!(set_y5, TLE_CHAN_Y5, y5_state);
 }

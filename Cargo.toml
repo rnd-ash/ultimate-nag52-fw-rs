@@ -6,6 +6,7 @@ members = [
     "diag_common",
     "flasher",
     "preloader",
+    "macros",
 ]
 
 [workspace.dependencies]

@@ -5,7 +5,7 @@ use mcan::tx_buffers::DynTx;
 pub use super::data::egs_52::*;
 use crate::{
     can::{
-        input_output::{CanInput, CanOutput},
+        input_output::{CanRxSignals, CanTxSignals},
         CanLayer, RxFrame,
     },
     handle_frames, rxframe_default,
@@ -41,7 +41,7 @@ impl Egs52Can {
     }
 }
 
-impl CanLayer<CanInput, CanOutput> for Egs52Can {
+impl CanLayer<CanTxSignals, CanRxSignals> for Egs52Can {
     fn transmit(
         &self,
         can_tx: &mut mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>,
@@ -52,14 +52,14 @@ impl CanLayer<CanInput, CanOutput> for Egs52Can {
         Ok(())
     }
 
-    fn read_signals(&self, dest: &mut CanOutput) {
+    fn read_signals(&self, dest: &mut CanRxSignals) {
         if let Some(ewm230) = self.ewm_230.get(1000) {
             let whc = ewm230.whc();
             //defmt::info!("Valid ewm230: {}  {:?}", ewm230, whc);
         }
     }
 
-    fn write_signals(&mut self, sigs: &CanInput) {}
+    fn write_signals(&mut self, sigs: &CanTxSignals) {}
 
     fn on_frame(&mut self, id: mcan::embedded_can::Id, data: &[u8; 8]) {
         handle_frames!(
