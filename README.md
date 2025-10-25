@@ -1,10 +1,38 @@
 # Ultimate-NAG52 firmware V2
-Ultimate NAG52 V2 firmware (Rust version)
+
+**VERY EARLY WORK IN PROGRESS**
+
+Ultimate NAG52 V2 firmware (Written in 100% Rust!)
 
 This is for the Alpha board gen 2.0 (Closing PCB testing), using Atmel SAME54 series processor.
 
+![](imgs/egs.png)
 
-## Startup process
+## What is this?
+
+The next generation of the Ultimate-NAG52 PCB which improves on many things. The existing (older) 1.x ESP32 PCB firmware written in C++
+can be found [here](https://github.com/rnd-ash/ultimate-nag52-fw)
+
+Ultimate-NAG52 is a long-running project of mine, creating a much better controller for Mercedes' 722.6 5 speed automatic gearbox. The original controller's for this box were called EGS51, EGS52, and EGS53 (**Elektronische Getriebesteuerung 5-Gang V1/2/3**), where 51 was based on an SEC51C810 processor, and 52/53 are based on a C166/ST10 processor. 
+
+## Development youtube videos
+* [Bootloader and flashing demo](https://youtu.be/43IkJqjCc6U)
+* [IO + Solenoids demonstration](https://youtu.be/8vf_0HNlVDg)
+
+## Repository folders
+
+|Folder|Description|
+|:-:|:-:|
+|bootloader|Bootloader of the TCU which supports flashing over KWP2000 over either USB or CAN|
+|bsp|Board definition code (Pin assignments), and also some extra helper function for constructing peripherals|
+|candb_codegen|A dependency of the firmware. This converts the CAN database text files into code at compile time for the firmware to use|
+|firmware|The TCU application code|
+|flasher|CLI flashing and diagnostics utility|
+|macros|Helper proc-macros for the firmware|
+|preloader|Preloader app which allows the bootloader to be self-updating|
+
+
+## TCU Boot sequence
 
 1. CPU jumps to [preloader](preloader/) on power on
     * If bootloader requires updating, the bootloader scratch area is verified, before being copied to the bootloader memory location.
@@ -21,7 +49,7 @@ This is for the Alpha board gen 2.0 (Closing PCB testing), using Atmel SAME54 se
 
 ### Time to boot
 
-This is taken for a nominal boot (No regions are to be flashed)
+This is taken for a nominal boot (No regions are to be flashed). [Comparison YT short comparing V1.3 PCB bootup to OEM EGS52 to this bootloader](https://youtube.com/shorts/wH1RuCAuE14)
 
 |Timestamp||
 |:-:|:-:|
