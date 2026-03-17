@@ -42,8 +42,8 @@
 use core::ops::Deref;
 
 use atsamd_hal::pac::{
-    tc0::{self, count16::evctrl::Evactselect},
     Mclk,
+    tc0::{self, count16::evctrl::Evactselect},
 };
 
 use atsamd_hal::clock::v2::pclk::Pclk;
@@ -186,25 +186,22 @@ impl<T: CounterInstance, EvId: super::evsys::ChId, EvSrc: EvSysGenerator>
         (self.instance, unhooked)
     }
 
-    /// Retreives the current number of pulses counted.
-    ///
-    /// This does not clear the counted value, to do that, call [PulseCounter::clear]
-    pub fn count(&self) -> u16 {
+    pub fn count_and_clear(&self) -> u16 {
         let instance = self.instance.count16();
         instance.ctrlbset().write(|w| w.cmd().readsync());
         self.sync();
         while instance.ctrlbset().read().cmd().bits() != 0 {
             core::hint::spin_loop();
         }
-        let res = instance.count().read().bits();
-        res
+        let count = instance.count().read().bits();
+        self.clear();
+        count
     }
 
-    /// Set the counter value back to 0
+    #[inline(always)]
     pub fn clear(&self) {
         let instance = self.instance.count16();
         instance.count().reset();
-        self.sync();
     }
 
     fn sync(&self) {

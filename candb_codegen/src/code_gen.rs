@@ -194,14 +194,14 @@ use bitbybit::*;
 
             // Impl (CAN ID)
             let _ = writeln!(s, "impl super::SignalFrame for {} {{", frame_name);
-            let _ = writeln!(s, "\tconst CAN_ID: Id = unsafe {{ Id::Standard(StandardId::new_unchecked(0x{:04X})) }};", frame.id);
-            let _ = writeln!(s, "\tfn as_tx_can_msg(&self) -> mcan::message::tx::Message<64> {{");
+            let _ = writeln!(s, "\tconst CAN_ID: StandardId = unsafe {{ StandardId::new_unchecked(0x{:04X}) }};", frame.id);
+            let _ = writeln!(s, "\tfn as_tx_can_msg(&self) -> mcan::message::tx::Message<8> {{");
             let n_bytes = frame.signals.last().map(|x| {
                 ((x.len + x.offset) / 8) as usize
             }).unwrap_or(8);
             let _ = writeln!(s, "\t\tlet bytes = &self.raw_value().to_be_bytes()[..{n_bytes}];");
             let _ = writeln!(s, "\t\tMessage::new(MessageBuilder {{");
-            let _ = writeln!(s, "\t\t\tid: Self::CAN_ID,");
+            let _ = writeln!(s, "\t\t\tid: Id::Standard(Self::CAN_ID),");
             let _ = writeln!(s, "\t\t\tframe_type: FrameType::Classic(ClassicFrameType::Data(bytes)),");
             let _ = writeln!(s, "\t\t\tstore_tx_event: None,");
             let _ = writeln!(s, "\t\t}})");

@@ -2,28 +2,32 @@ use core::{ptr::NonNull, sync::atomic::Ordering};
 
 use atsamd_hal::{
     self,
+    dsu::Dsu,
     fugit::ExtU64,
-    nvm::{self, Nvm},
-    pac::{dsu::did::Seriesselect, Peripherals},
+    nvm::{
+        self, Nvm,
+        smart_eeprom::{SmartEeprom, SmartEepromState, Unlocked},
+    },
+    pac::{Peripherals, dsu::did::Seriesselect},
     rtic_time::Monotonic,
     serial_number,
     trng::Trng,
     usb::UsbBus,
 };
 pub use automotive_diag::kwp2000::*;
-use bootloader::bl_info::MemoryRegion;
+use bootloader::bl_info::{CodeSectionInfo, MemoryRegion};
 use cortex_m::peripheral::SCB;
 use defmt::println;
 use diag_common::{
+    BootloaderStayReason,
     isotp_endpoints::usb_isotp::UsbIsoTpConsumer,
     ram_info::{BootloaderRamInfo, MAX_RESET_COUNT},
-    BootloaderStayReason,
 };
 use usbd_serial::DefaultBufferStore;
 
 use crate::{
-    bl_info::{self, get_bootloader_info, region_crc},
-    Mono, BS_EGS, ISOTP_BUF_SIZE, ST_MIN_EGS,
+    BS_EGS, ISOTP_BUF_SIZE, Mono, ST_MIN_EGS,
+    bl_info::{self, region_crc},
 };
 
 #[derive(Copy, Clone)]
@@ -81,6 +85,7 @@ pub struct KwpServer {
     pending_operation: PendingOperation,
     completed_operation: Option<CompletedOperation>,
     nvm: Nvm,
+    dsu: Dsu,
     last_cmd_time: u64,
     sec_level: SecurityLevel,
     flash_size: u32,
@@ -91,52 +96,22 @@ pub struct KwpServer {
 
 type ServerResult = core::result::Result<usize, KwpError>;
 
-impl KwpServer {
-    pub fn get_flash_size(nvm: &mut Nvm) -> u32 {
-        let flash_reduction_size = if let Ok(eeprom) = nvm.smart_eeprom() {
-            match eeprom {
-                nvm::smart_eeprom::SmartEepromMode::Locked(smart_eeprom) => {
-                    smart_eeprom.iter::<u8>().count()
-                }
-                nvm::smart_eeprom::SmartEepromMode::Unlocked(smart_eeprom) => {
-                    smart_eeprom.iter::<u8>().count()
-                }
-            }
-        } else {
-            0
-        } as u32;
-
-        let flash_size = unsafe {
-            let p = Peripherals::steal().dsu;
-            match p.did().read().series().variant() {
-                Some(Seriesselect::Same51) => {
-                    match p.did().read().devsel().bits() {
-                        0x00 | 0x04 => 1024 * 1024, // 1MB,
-                        0x01 | 0x02 => 512 * 1024,  // 512KB
-                        0x03 | 0x06 => 256 * 1024,  // 256KB
-                        _ => 0,
-                    }
-                }
-                Some(Seriesselect::Same54) => {
-                    match p.did().read().devsel().bits() {
-                        0x00 | 0x02 => 1024 * 1024, // 1MB,
-                        0x01 | 0x03 => 512 * 1024,  // 512KB
-                        _ => 0,
-                    }
-                }
-                _ => return 0,
-            }
-        };
-        flash_size - flash_reduction_size
+pub fn smart_eeprom(nvm: &mut Nvm) -> SmartEeprom<'_, Unlocked> {
+    match nvm.smart_eeprom().unwrap() {
+        nvm::smart_eeprom::SmartEepromMode::Locked(smart_eeprom) => smart_eeprom.unlock(),
+        nvm::smart_eeprom::SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
     }
+}
 
+impl KwpServer {
     pub fn new(
         mut nvm: Nvm,
         rnd: Trng,
+        dsu: Dsu,
         bootloader_ram_info: BootloaderRamInfo,
         bl_reason: BootloaderStayReason,
     ) -> Self {
-        let flash_size = Self::get_flash_size(&mut nvm);
+        let flash_size = atsamd_hal::nvm::retrieve_flash_size();
         Self {
             mode: KwpSessionType::Normal,
             pending_operation: PendingOperation::None,
@@ -144,6 +119,7 @@ impl KwpServer {
             buf: [0; 4096],
             flash_buf: [0; 4096],
             nvm,
+            dsu,
             last_cmd_time: 0,
             sec_level: DEFAULT_SEC_MODE,
             flash_size,
@@ -407,31 +383,66 @@ impl KwpServer {
             // 1 byte for ID type
             Err(KwpError::SubFunctionNotSupportedInvalidFormat)
         } else {
-            if cmd[1] == 0x86 {
-                let mut response = [0; 17];
-                response[0] = 0x86;
-                response[6] = 07;
-                response[7] = 25;
-                response[8] = get_bootloader_info().compile_week;
-                response[9] = get_bootloader_info().compile_year;
-                response[10] = 0x08; // ECU Origin (siemens)
-                response[11] = 0x02; // EGS52
-                #[cfg(debug_assertions)]
-                {
-                    // Set development bit if this is a debug build
-                    response[11] |= 0b1000_0000;
-                }
-                response[12] = 0xE1; // Diag version low byte
+            fn bcd_encode(v: u8) -> u8 {
+                let tens = v / 10;
+                let remain = v % 10;
+                tens << 4 | remain
+            }
+            if cmd[1] == 0x8A {
+                // Return all the block information on the ECU
+                let eeprom = smart_eeprom(&mut self.nvm);
+                let info = bl_info::get_smarteeprom_info(&eeprom);
 
-                let [day, _, month, year, ..] = self.nvm.read_userpage().userpage1_as_slice()[0..4]
-                else {
-                    unreachable!()
-                };
-                response[14] = year;
-                response[15] = month;
-                response[16] = day;
+                // 9 = SID ID + CRC BL(4) + CRC APP(4)
+                let mut response = [0; 9 + core::mem::size_of::<CodeSectionInfo>() * 3];
+                response[0] = 0x8A;
+
+                let mut offset = 1;
+                for blk in &[
+                    info.preloader_info,
+                    info.bootloader_info,
+                    info.firmware_info,
+                ] {
+                    let slice = unsafe {
+                        let ptr = blk as *const _ as *const u8;
+                        core::slice::from_raw_parts(ptr, core::mem::size_of::<CodeSectionInfo>())
+                    };
+                    response[offset..offset + slice.len()].copy_from_slice(slice);
+                    offset += slice.len();
+                }
+                // Copy the 2 CRCs
+                response[offset..offset + 4].copy_from_slice(&info.crc32_bl.to_le_bytes());
+                response[offset + 4..offset + 8].copy_from_slice(&info.crc32_app.to_le_bytes());
+
                 Ok(self.make_positive_reply(cmd[0], &response))
+            } else if cmd[1] == 0x86 {
+                let eeprom = smart_eeprom(&mut self.nvm);
+                let info = bl_info::get_smarteeprom_info(&eeprom);
+
+                if info.is_production_date_set() {
+                    let mut response = [0; 17];
+                    response[0] = 0x86;
+                    response[6] = bcd_encode(01);
+                    response[7] = bcd_encode(26);
+                    response[8] = bcd_encode(info.bootloader_info.compile_week);
+                    response[9] = bcd_encode(info.bootloader_info.compile_year);
+                    response[10] = 0x08; // ECU Origin (siemens)
+                    response[11] = 0x02; // EGS52
+                    if info.bootloader_info.is_debug != 0 {
+                        response[11] |= 0b1000_0000;
+                    }
+                    response[12] = 0xE1; // Diag version low byte
+                    response[14] = bcd_encode(info.board_prod_year);
+                    response[15] = bcd_encode(info.board_prod_month);
+                    response[16] = bcd_encode(info.board_prod_day);
+                    Ok(self.make_positive_reply(cmd[0], &response))
+                } else {
+                    // No production data
+                    Err(KwpError::ConditionsNotCorrectRequestSequenceError)
+                }
             } else if cmd[1] == 0x87 {
+                let eeprom = smart_eeprom(&mut self.nvm);
+                let info = bl_info::get_smarteeprom_info(&eeprom);
                 let mut response = [0; 21];
                 response[0] = 0x87;
                 response[1] = 0x08; // ECU Origin (Siemens)
@@ -448,9 +459,9 @@ impl KwpServer {
                 response[6] = 2;
                 response[7] = 0;
                 // SW Version
-                response[8] = get_bootloader_info().version_major;
-                response[9] = get_bootloader_info().version_minor;
-                response[10] = get_bootloader_info().version_patch;
+                response[8] = info.bootloader_info.version_major;
+                response[9] = info.bootloader_info.version_minor;
+                response[10] = info.bootloader_info.version_patch;
                 response[11..21].copy_from_slice("1234567890".as_bytes());
                 Ok(self.make_positive_reply(cmd[0], &response))
             } else {
@@ -475,27 +486,23 @@ impl KwpServer {
             if self.sec_level != SecurityLevel::FullUnlocked {
                 return Err(KwpError::SecurityAccessDenied);
             }
+            let mut eeprom = smart_eeprom(&mut self.nvm);
+            let curr_info = bl_info::get_smarteeprom_info(&eeprom);
             // Day, Week, Month, year
             if cmd[2] > 31 || cmd[3] > 52 || cmd[4] > 12 || cmd[5] < 24 {
                 Err(KwpError::SubFunctionNotSupportedInvalidFormat)
-            } else if self.nvm.read_userpage().userpage1_as_slice()[..4] != [0xFF; 4] {
+            } else if curr_info.is_production_date_set() {
                 Err(KwpError::ConditionsNotCorrectRequestSequenceError)
             } else {
-                if unsafe {
-                    self.nvm.modify_userpage(|f| {
-                        println!("{:02X}", cmd[2..]);
-                        f.userpage1_as_slice_mut()[..4].copy_from_slice(&cmd[2..]);
-                    })
-                }
-                .is_ok()
-                {
-                    Ok(self.make_positive_reply(cmd[0], &[cmd[1]]))
-                } else {
-                    Err(KwpError::GeneralReject)
-                }
+                bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                    info.board_prod_day = cmd[2];
+                    info.board_prod_week = cmd[3];
+                    info.board_prod_month = cmd[4];
+                    info.board_prod_year = cmd[5];
+                });
+                Ok(self.make_positive_reply(cmd[0], &[cmd[1]]))
             }
         } else if cmd[1] == 0xE0 {
-            defmt::error!("{:02X}", cmd);
             if cmd.len() != 8 {
                 return Err(KwpError::SubFunctionNotSupportedInvalidFormat);
             }
@@ -510,15 +517,11 @@ impl KwpServer {
                 start_addr = MemoryRegion::Application.range_exclusive().start;
             } else if start_addr >= MemoryRegion::Application.range_exclusive().start {
                 // Mark app as erased now
-                if let Err(e) = unsafe {
-                    bl_info::mutate_bootloader_info(&mut self.nvm, |info| {
-                        info.app_flashing_not_done = 0xFF;
-                        info.application_crc = 0xFFFF_FFFF
-                    })
-                } {
-                    defmt::error!("Bootloader info mutate error: {}", e);
-                    return Err(KwpError::GeneralReject);
-                }
+                let mut eeprom = smart_eeprom(&mut self.nvm);
+                bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                    info.app_flashing_not_done = 0xFF;
+                    info.crc32_app = 0xFFFF_FFFF
+                });
             } else {
                 return Err(KwpError::RequestOutOfRange);
             }
@@ -537,61 +540,48 @@ impl KwpServer {
             }
             let targ_crc = u32::from_le_bytes(cmd[2..6].try_into().unwrap());
             let mut start_addr = u32::from_le_bytes(cmd[6..10].try_into().unwrap());
-            let mut end_addr = u32::from_le_bytes(cmd[10..14].try_into().unwrap());
+            let len = u32::from_le_bytes(cmd[10..14].try_into().unwrap());
             let mut is_bootloader = false;
 
             if start_addr == MemoryRegion::Bootloader.start_addr() {
                 start_addr = MemoryRegion::BootloaderScratch.start_addr();
-                end_addr += MemoryRegion::BootloaderScratch.start_addr()
-                    - MemoryRegion::Bootloader.start_addr();
                 is_bootloader = true;
             }
 
             // Just check that addrs are valid
             self.check_addr(start_addr, false)?;
-            self.check_addr(end_addr, false)?;
-            // Check that start < end
-            if end_addr <= start_addr {
-                Err(KwpError::SubFunctionNotSupportedInvalidFormat)
-            } else {
-                let start = start_addr as *const u8;
-                let slice = unsafe {
-                    core::ptr::slice_from_raw_parts(start, (end_addr - start_addr) as usize)
-                        .as_ref()
-                        .unwrap()
-                };
-                let result = embedded_crc32c::crc32c(slice);
-                if result == targ_crc {
-                    // CRC32 OK, now make a CRC of the entire app flash region, and write it to the app
-                    if let Err(e) = unsafe {
-                        if is_bootloader {
-                            bl_info::mutate_bootloader_info(&mut self.nvm, |info| {
-                                info.bootloader_flashing_pending = 0;
-                                info.bootloader_flashing_crc = region_crc(
-                                    bl_info::MemoryRegion::BootloaderScratch.range_exclusive(),
-                                )
-                            })
-                        } else {
-                            bl_info::mutate_bootloader_info(&mut self.nvm, |info| {
-                                info.app_flashing_not_done = 0;
-                                info.application_crc =
-                                    region_crc(bl_info::MemoryRegion::Application.range_exclusive())
-                            })
-                        }
-                    } {
-                        defmt::error!("Bootloader info mutate error: {}", e);
-                        return Err(KwpError::GeneralReject);
-                    }
-
-                    Ok(self.make_positive_reply(cmd[0], &[0xE1, 0x01]))
+            self.check_addr(start_addr + len, false)?;
+            let result = self.dsu.crc32(start_addr, len).unwrap_or(0);
+            if result == targ_crc {
+                let mut eeprom = smart_eeprom(&mut self.nvm);
+                // CRC32 OK, now make a CRC of the entire app flash region, and write it to the app
+                if is_bootloader {
+                    bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                        info.bl_flashing_pending = 0;
+                        info.bootloader_info.clear();
+                        info.crc32_bl = region_crc(
+                            bl_info::MemoryRegion::BootloaderScratch.range_exclusive(),
+                            &mut self.dsu,
+                        )
+                    });
                 } else {
-                    defmt::error!(
-                        "CRC Failed: Target: 0x{:08X}, actual: 0x{:08X}",
-                        targ_crc,
-                        result
-                    );
-                    Ok(self.make_positive_reply(cmd[0], &[0xE1, 0x00]))
+                    bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                        info.app_flashing_not_done = 0;
+                        info.firmware_info.clear();
+                        info.crc32_app = region_crc(
+                            bl_info::MemoryRegion::Application.range_exclusive(),
+                            &mut self.dsu,
+                        )
+                    });
                 }
+                Ok(self.make_positive_reply(cmd[0], &[0xE1, 0x01]))
+            } else {
+                defmt::error!(
+                    "CRC Failed: Target: 0x{:08X}, actual: 0x{:08X}",
+                    targ_crc,
+                    result
+                );
+                Ok(self.make_positive_reply(cmd[0], &[0xE1, 0x00]))
             }
         } else {
             Err(KwpError::SubFunctionNotSupportedInvalidFormat)

@@ -7,7 +7,7 @@ use std::{
 };
 
 use chrono::{Datelike, Utc};
-use clap::{builder::styling::Color, *};
+use clap::{*};
 use clap_num::maybe_hex;
 use color_eyre::{
     eyre::{Report, Result},
@@ -26,19 +26,17 @@ use ecu_diagnostics::{
 };
 use elf::{
     abi::PT_LOAD,
-    endian::{self, LittleEndian},
 };
 use indicatif::{HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 use object::{
-    elf::FileHeader32,
-    read::elf::{FileHeader, ProgramHeader},
-    Endianness,
+    Endianness, Object, ObjectSection, SectionKind, elf::FileHeader32, read::elf::{FileHeader, ProgramHeader}
 };
-use serialport::SerialPortType;
 
 use crate::usb_diag_compat::UsbDiagIface;
 
 mod usb_diag_compat;
+
+const DSU_CRC32_SEED: u32 = 0xEDB88320;
 
 #[cfg(target_os = "linux")]
 use ecu_diagnostics::hardware::socketcan::SocketCanScanner;
@@ -115,11 +113,16 @@ pub const EGS_DIAG_SETTINGS: DiagServerBasicOptions = DiagServerBasicOptions {
     },
 };
 
-fn launch_server_usb() -> Result<DynamicDiagSession, Report> {
-    println!("Waiting for device to be available...");
+fn launch_server_usb(mp: &mut MultiProgress) -> Result<DynamicDiagSession, Report> {
+    let mut next_bar = mp.add(ProgressBar::new_spinner());
+    let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
+        .unwrap()
+        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
+    next_bar.set_style(spinner_style);
+    next_bar.enable_steady_tick(Duration::from_millis(100));
+    next_bar = next_bar.with_message("Waiting for device to be available");
     let serial = UsbDiagIface::new()?;
-
-    let channel = Box::new(serial) as Box<dyn IsoTPChannel>;
+    let mut channel = Box::new(serial) as Box<dyn IsoTPChannel>;
 
     let egs_isotp_opts: IsoTPSettings = IsoTPSettings {
         block_size: 0,
@@ -130,22 +133,25 @@ fn launch_server_usb() -> Result<DynamicDiagSession, Report> {
         can_use_ext_addr: false,
     };
 
-    let server = DynamicDiagSession::new_over_iso_tp(
+    channel.set_iso_tp_cfg(egs_isotp_opts)?;
+    channel.set_ids(0x07E1, 0x07E9)?;
+    channel.open()?;
+
+    let server = DynamicDiagSession::new(
         Kwp2000Protocol::default(),
         channel,
-        egs_isotp_opts,
         EGS_DIAG_SETTINGS,
         None,
         DiagServerEmptyLogger {},
     )?;
-
+    mp.remove(&next_bar);
     Ok(server)
 }
 
-fn create_server(fast_mode: &mut bool, args: &Flasher) -> Result<DynamicDiagSession, Report> {
+fn create_server(fast_mode: &mut bool, args: &Flasher, mp: &mut MultiProgress) -> Result<DynamicDiagSession, Report> {
     #[cfg(target_os = "linux")]
     let server = match args.interface {
-        Interface::Usb => launch_server_usb(),
+        Interface::Usb => launch_server_usb(mp),
         Interface::Can => {
             *fast_mode = false;
             launch_server_isotp(&args.can_iface.clone().unwrap(), false)
@@ -165,7 +171,7 @@ fn launch_server_isotp(can_iface_name: &str, fast: bool) -> Result<DynamicDiagSe
     use ecu_diagnostics::dynamic_diag::DiagServerAdvancedOptions;
 
     let mut socket_can = SocketCanScanner::new().open_device_by_name(can_iface_name)?;
-    let channel = socket_can.create_iso_tp_channel()?;
+    let mut channel = socket_can.create_iso_tp_channel()?;
 
     let egs_isotp_opts: IsoTPSettings = IsoTPSettings {
         block_size: if fast { 0 } else { 0x20 },
@@ -184,10 +190,13 @@ fn launch_server_isotp(can_iface_name: &str, fast: bool) -> Result<DynamicDiagSe
         command_cooldown_ms: 0,
     };
 
-    let server = DynamicDiagSession::new_over_iso_tp(
+    channel.set_iso_tp_cfg(egs_isotp_opts)?;
+    channel.set_ids(0x07E1, 0x07E9)?;
+    channel.open()?;
+
+    let server = DynamicDiagSession::new(
         Kwp2000Protocol::default(),
         channel,
-        egs_isotp_opts,
         EGS_DIAG_SETTINGS,
         Some(adv_opts),
         DiagServerEmptyLogger {},
@@ -234,7 +243,7 @@ fn read(
             KwpSessionType::ExtendedDiagnostics.into(),
             0,
             0,
-        ])?;
+        ], None)?;
     } else {
         server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
     }
@@ -265,7 +274,7 @@ fn read(
         ));
         let mut req = vec![0x23, max as u8];
         req.extend_from_slice(&(start_addr + v.len() as u32).to_le_bytes());
-        let resp = server.send_byte_array_with_response(&req)?;
+        let resp = server.send_byte_array_with_response(&req, None)?;
         v.extend_from_slice(&resp[1..]);
         pb.set_position(v.len() as u64);
     }
@@ -277,13 +286,13 @@ fn read(
     Ok(())
 }
 
-fn analyze(file: PathBuf) -> Result<(), Report> {
-    println!("Analyzing {file:?}");
-    /*
+// Limit on flash size
+fn analyze(file: &PathBuf, flash_max: u64) -> Result<(), Report> {
     let binary_bytes = fs::read(file)?;
     let elf = object::File::parse(&*binary_bytes)?;
     let mut flash_bytes: usize = 0;
     let mut ram_bytes: usize = 0;
+    let mut high_ram_watermark: u32 = 0;
     for section in elf.sections() {
         if section.kind() == SectionKind::Other || section.kind() == SectionKind::Metadata || section.kind() == SectionKind::OtherString {
             continue;
@@ -294,9 +303,13 @@ fn analyze(file: PathBuf) -> Result<(), Report> {
         } else if section.address() >= 0x20000000 && section.address() <= 0x2003FFFF {
             // RAM
             ram_bytes += section.size() as usize;
+            let max = (section.size() + section.address()) as u32;
+            high_ram_watermark = high_ram_watermark.max(max);
         }
+        
     }
-    let pb_flash = ProgressBar::new(1024*1024)
+    let ram_alloc = high_ram_watermark - 0x20000000;
+    let pb_flash = ProgressBar::new(flash_max)
         .with_style(ProgressStyle::with_template("Flash usage: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})")
         .unwrap()
         .progress_chars("##-"));
@@ -308,7 +321,12 @@ fn analyze(file: PathBuf) -> Result<(), Report> {
         .progress_chars("##-"));
     pb_ram.set_position(ram_bytes as u64);
     pb_ram.abandon();
-    */
+    let pb_ram_watermark = ProgressBar::new(256*1024)
+        .with_style(ProgressStyle::with_template("  RAM alloc: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})")
+        .unwrap()
+        .progress_chars("##-"));
+    pb_ram_watermark.set_position(ram_alloc as u64);
+    pb_ram_watermark.abandon();
     Ok(())
 }
 
@@ -317,8 +335,16 @@ fn flash(
     file: &PathBuf,
     server: &mut DynamicDiagSession,
     fast_mode: bool,
-    is_bootloader: bool,
+    is_bl: bool
 ) -> Result<(), Report> {
+    const PRE_END_ADDR: u64 = 1024*8;
+    const BL_END_ADDR: u64 = 1024*128;
+    let max_size = if is_bl {
+        BL_END_ADDR-PRE_END_ADDR
+    } else {
+        (1024*1024)-BL_END_ADDR
+    };
+    analyze(file, max_size)?;
     let binary_bytes = fs::read(file)?;
     let binary = FileHeader32::<Endianness>::parse(&*binary_bytes)?;
     let endian = binary.endian()?;
@@ -328,7 +354,6 @@ fn flash(
     for segment in binary.program_headers(binary.endian()?, &*binary_bytes)? {
         let p_paddr: u64 = segment.p_paddr(endian).into();
         let p_vaddr: u64 = segment.p_vaddr(endian).into();
-        let flags = segment.p_flags(endian);
         let segment_data = segment
             .data(endian, &*binary_bytes)
             .map_err(|_| Report::msg("Failed to access data for ELF segment"))?;
@@ -374,11 +399,11 @@ fn flash(
             KwpSessionType::Reprogramming.into(),
             0,
             0,
-        ])?;
+        ], None)?;
     } else {
         server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
     }
-    std::thread::sleep(Duration::from_millis(100)); // Allow the MCU to reset to bootloader
+    std::thread::sleep(Duration::from_millis(1000)); // Allow the MCU to reset to bootloader
     let spinner = next_spinner(&mp, Some(spinner), 2, 6);
     spinner.set_message(format!(
         "Erasing flash ({} from 0x{:08X})",
@@ -391,13 +416,13 @@ fn flash(
     erase_cmd[1] = 0xE0;
     erase_cmd[2..6].copy_from_slice(&(start_address as u32).to_le_bytes());
     erase_cmd[6..8].copy_from_slice(&(num_pages as u16).to_le_bytes());
-    server.send_byte_array_with_response(&erase_cmd)?;
+    server.send_byte_array_with_response(&erase_cmd, None)?;
     let mut e_counter = 0;
     loop {
         match server.send_byte_array_with_response(&[
             KwpCommand::RequestRoutineResultsByLocalIdentifier.into(),
             0xE0,
-        ]) {
+        ], None) {
             Ok(res) => {
                 if res[2] == 0x00 {
                     break;
@@ -422,11 +447,11 @@ fn flash(
                         KwpSessionType::Reprogramming.into(),
                         0,
                         0,
-                    ])?;
+                    ], None)?;
                 } else {
                     server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
                 }
-                server.send_byte_array_with_response(&erase_cmd)?;
+                server.send_byte_array_with_response(&erase_cmd, None)?;
                 if e_counter == 2 {
                     return Err(e.into());
                 }
@@ -440,7 +465,7 @@ fn flash(
     download_req.extend_from_slice(&(start_address as u32).to_le_bytes());
     download_req.push(0x00); // Fmt
     download_req.extend_from_slice(&(array.len() as u32).to_le_bytes());
-    server.send_byte_array_with_response(&download_req)?;
+    server.send_byte_array_with_response(&download_req, None)?;
     let mut counter: u8 = 0;
     const MAX_COPY: usize = 1024;
     let mut block = [0; MAX_COPY + 2];
@@ -466,23 +491,25 @@ fn flash(
         block[1] = counter;
         block[2..2 + max_copy].copy_from_slice(&array[addr..addr + max_copy]);
         pb.set_position(addr as u64);
-        server.send_byte_array_with_response(&block[..max_copy + 2])?;
+        server.send_byte_array_with_response(&block[..max_copy + 2], None)?;
         addr += max_copy;
         counter = counter.wrapping_add(1);
     }
     pb.finish_with_message(format!("{}", style("✔").green()));
+    mp.remove(&pb);
     let spinner = next_spinner(&mp, Some(spinner), 5, 6);
     spinner.set_message("Verifying flashed data");
     // Start flash check routine
-    let targ_crc = embedded_crc32c::crc32c(&array);
+    let mut hasher = crc32fast::Hasher::new_with_initial(DSU_CRC32_SEED);
+    hasher.reset();
+    hasher.update(&array);
+    let targ_crc = hasher.finalize();
     let mut buf = vec![0x31, 0xE1];
     let start = start_address as u32;
-    let end = start_address as u32 + array.len() as u32;
-
     buf.extend_from_slice(&targ_crc.to_le_bytes());
     buf.extend_from_slice(&start.to_le_bytes());
-    buf.extend_from_slice(&end.to_le_bytes());
-    let response = server.send_byte_array_with_response(&buf)?;
+    buf.extend_from_slice(&(array.len() as u32).to_le_bytes());
+    let response = server.send_byte_array_with_response(&buf, None)?;
     if response[2] == 0x00 {
         return Err(Report::msg("Flash CRC compare failed"));
     }
@@ -490,7 +517,7 @@ fn flash(
     // Reset ECU
     let spinner = next_spinner(&mp, Some(spinner), 6, 6);
     spinner.set_message("Resetting ECU");
-    server.send_byte_array_with_response(&[KwpCommand::ECUReset.into(), 0x01])?;
+    server.send_byte_array_with_response(&[KwpCommand::ECUReset.into(), 0x01], None)?;
     spinner.finish_with_message(format!("{} {}", spinner.message(), style("✔").green()));
     Ok(())
 }
@@ -544,26 +571,28 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
     let mut panic_location: Option<(String, u32, u32)> = None;
 
     if ident.diag_info.is_boot_sw() {
-        if let Ok(res) = server.send_byte_array_with_response(&[0x21, 0xE2]) {
+        if let Ok(res) = server.send_byte_array_with_response(&[0x21, 0xE2], None) {
             let txt = match BootloaderStayReason::from(res[2]) {
                 BootloaderStayReason::None => style("Diagnostics").green(),
                 BootloaderStayReason::ResetCount => style("Quick reboot count exceeded").yellow(),
                 BootloaderStayReason::Watchdog => style("Watchdog triggered").red(),
                 BootloaderStayReason::Panic => style("Application panicked (See below)").red(),
+                BootloaderStayReason::RamFailure => style("RAM Test failure").red(),
                 BootloaderStayReason::MagicPin => style("Magic pin held high").green(),
+                BootloaderStayReason::ProductionInfoNotSet => style("Board production info not burned").yellow(),
                 BootloaderStayReason::AppInvalid => {
                     style("Application invalid or flashing not completed").yellow()
                 }
-                BootloaderStayReason::Unkown => style("Unknown").yellow(),
+                BootloaderStayReason::Unkown => style("Unknown").red(),
             };
             map.insert("In Bootloader reason", Some(format!("{}", txt)));
 
             if BootloaderStayReason::from(res[2]) == BootloaderStayReason::Panic {
-                if let Ok(panic_msg_res) = server.send_byte_array_with_response(&[0x21, 0xE3]) {
+                if let Ok(panic_msg_res) = server.send_byte_array_with_response(&[0x21, 0xE3], None) {
                     let msg = String::from_utf8_lossy(&panic_msg_res[2..]);
                     panic_msg = Some(msg.to_string());
                 }
-                if let Ok(location_msg_res) = server.send_byte_array_with_response(&[0x21, 0xE4]) {
+                if let Ok(location_msg_res) = server.send_byte_array_with_response(&[0x21, 0xE4], None) {
                     let column = u32::from_le_bytes(location_msg_res[2..6].try_into().unwrap());
                     let line = u32::from_le_bytes(location_msg_res[6..10].try_into().unwrap());
                     let file = String::from_utf8_lossy(&location_msg_res[10..]);
@@ -611,6 +640,110 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
                 col
             );
         }
+    } else {
+        // Print more detailed info if required
+        if let Ok(ident) = server.send_byte_array_with_response(&[0x1A, 0x8A], None) {
+            println!(
+                "\n{}",
+                style("Software detailed information").bold().bright_purple()
+            );
+
+            const FW_BLK_SIZE: usize = 33;
+            let mut blk = 0usize;
+            for (idx, cat) in ["Preloader block", "Bootloader block", "Application block"].iter().enumerate() {
+                let slice = &ident[2+(blk*FW_BLK_SIZE)..2+(FW_BLK_SIZE*(blk+1))];
+                let s = if slice.contains(&0xFF) {
+                    // Blank
+                    style("Not flashed").bold().red()
+                } else {
+                    style("Present").bold().green()
+                };
+                let (wall, arrow) = if idx == 2 {
+                    (" ", "└─")
+                } else {
+                    ("│", "├─")
+                };
+                println!(
+                    "{arrow}{}: {}",
+                    style(cat).bold(),
+                    s
+                );
+
+                const PADDING: usize = 16;
+                if !slice.contains(&0xFF) {
+                    // Print information
+                    let name = String::from_utf8_lossy(&slice[0..10]);
+                    let sha = String::from_utf8_lossy(&slice[10..22]);
+
+                    println!(
+                        "{wall} ├─{: <PADDING$}: {}",
+                        style("Identified name").bold().dim(),
+                        style(name).green().dim(),
+                    );
+
+                    println!(
+                        "{wall} ├─{: <PADDING$}: {}",
+                        style("Git SHA").bold().dim(),
+                        style(sha).green().dim(),
+                    );
+                    
+                    println!(
+                        "{wall} ├─{: <PADDING$}: {}",
+                        style("Version").bold().dim(),
+                        style(format!("{}.{}.{}", slice[22], slice[23], slice[24])).green().dim(),
+                    );
+
+                    println!(
+                        "{wall} ├─{: <PADDING$}: {}",
+                        style("Rustc version").bold().dim(),
+                        style(format!("{}.{}.{}", slice[25], slice[26], slice[27])).green().dim(),
+                    );
+
+                    println!(
+                        "{wall} ├─{: <PADDING$}: {}",
+                        style("Compile date").bold().dim(),
+                        style(format!("{}/{}/20{:02} (Week {})", slice[31], slice[29], slice[28], slice[30])).green().dim(),
+                    );
+
+                    let dbg_txt = if slice[32] == 0x00 {
+                       style("No").green().dim()
+                    } else {
+                       style("Yes").yellow().dim()
+                    };
+
+                    if idx > 0 {
+                        // Grab CRC too
+                        let start = 101+((idx-1)*4);
+                        let crc = u32::from_le_bytes(ident[start..start+4].try_into().unwrap());
+                        let crc_txt = if crc == 0xFFFF_FFFF || crc == 0 {
+                            // Debug flash
+                            style("Not present - Flashed via debugger".to_string()).yellow().dim()
+                        } else {
+                            style(format!("0x{:08X}", crc)).green().dim()
+                        };
+                        println!(
+                            "{wall} ├─{: <PADDING$}: {crc_txt}",
+                            style("Fingerprint").bold().dim()
+                        );
+                    }
+
+                    println!(
+                        "{wall} └─{: <PADDING$}: {dbg_txt}",
+                        style("Debug build").bold().dim(),
+                    );
+
+                    if idx != 2 {
+                        println!("{wall}");
+                    }
+                }
+
+
+
+
+
+                blk += 1;
+            }
+        }
     }
 
     Ok(())
@@ -631,7 +764,7 @@ fn burn_date(server: DynamicDiagSession) -> Result<(), Report> {
     req[3] = date.iso_week().week() as u8; // Week
     req[4] = date.month() as u8; // Month
     req[5] = (date.year() % 100) as u8; // Year
-    server.send_byte_array_with_response(&req)?;
+    server.send_byte_array_with_response(&req, None)?;
     println!(
         "Burnt production date: {}/{}/{} (Week {})",
         req[2], req[4], req[5], req[3]
@@ -645,7 +778,7 @@ fn set_security_lock(server: DynamicDiagSession, en: bool) -> Result<(), Report>
         KwpCommand::StartRoutineByLocalIdentifier.into(),
         0xFE,
         en as u8,
-    ])?;
+    ], None)?;
     Ok(())
 }
 
@@ -656,14 +789,13 @@ fn main() -> Result<()> {
     let args = Flasher::parse();
 
     if let Command::Analyze { file } = &args.command {
-        analyze(file.clone())?;
+        analyze(&file, 1024*1024)?;
         return Ok(());
     }
 
     let mut fast_mode = false;
-    let mut server = create_server(&mut fast_mode, &args)?;
-
     let mut mp = MultiProgress::new();
+    let mut server = create_server(&mut fast_mode, &args, &mut mp)?;
     let res = match &args.command {
         Command::Flash {
             bootloader,
@@ -678,16 +810,20 @@ fn main() -> Result<()> {
                 flash(&mp, loader, &mut server, fast_mode, true)?;
             }
             drop(mp);
+            mp = MultiProgress::new();
             if has_bootloader {
                 println!(
                     "{}",
                     style("Flashing application (Stage 2/2)").bold().green()
                 );
+                // Restart the server to drain buffers etc
+                let _ = server.release();
+                std::thread::sleep(Duration::from_millis(1000));
+                server = create_server(&mut fast_mode, &args, &mut mp).unwrap();
             } else {
                 println!("{}", style("Flashing application").bold().green());
             }
-            mp = MultiProgress::new();
-            std::thread::sleep(Duration::from_millis(100)); // Allow the MCU to reset to bootloader
+            
             flash(&mp, application, &mut server, fast_mode, false)
         }
         Command::Read {

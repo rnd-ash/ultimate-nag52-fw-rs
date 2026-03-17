@@ -1,7 +1,7 @@
 [package]
 name = "bootloader"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "bootloader"
@@ -20,7 +20,7 @@ atsamd-hal = { workspace = true, features = [
 ] }
 cortex-m = { workspace = true, features = ["inline-asm"] }
 mcan.workspace = true
-konst = "0.4.1"
+konst = { version = "0.4.1", features = ["iter"] }
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 rtic = { version = "2.2.0", features = ["thumbv7-backend"] }
@@ -28,7 +28,6 @@ automotive_diag = { version = "0.1.21", default-features = false, features = [
     "kwp2000",
 ] }
 usbd-serial = "0.2.2"
-embedded-crc32c = "0.1.0"
 heapless = "0.9.1"
 static_assertions = "1.1.0"
 rtic-sync = "1.4.0"
@@ -38,6 +37,8 @@ embedded-hal = { version = "1.0.0" }
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["now"] }
 rustc_version = "0.4.1"
+vergen = { version = "9.1.0" }
+vergen-git2 = { version = "9.1.0" }
 
 [features]
 lib = []

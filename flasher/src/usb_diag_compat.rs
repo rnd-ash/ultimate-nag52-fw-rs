@@ -75,7 +75,10 @@ impl IsoTPChannel for UsbDiagIface {
 
 impl PayloadChannel for UsbDiagIface {
     fn open(&mut self) -> ecu_diagnostics::channel::ChannelResult<()> {
-        Ok(())
+        self.with_serial(|serial| {
+            serial.clear(serialport::ClearBuffer::All)?;
+            Ok(())
+        })
     }
 
     fn close(&mut self) -> ecu_diagnostics::channel::ChannelResult<()> {

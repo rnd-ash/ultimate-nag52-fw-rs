@@ -20,13 +20,11 @@ use futures::FutureExt;
 
 use crate::isotp_endpoints::SharedIsoTpBuf;
 
-#[inline(always)]
-fn make_fc_ok(stmin: u8, bs: u8) -> [u8; 8] {
+const fn make_fc_ok(stmin: u8, bs: u8) -> [u8; 8] {
     [0x30, bs, stmin, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC]
 }
 
-#[inline(always)]
-fn make_fc_reject() -> [u8; 8] {
+const fn make_fc_reject() -> [u8; 8] {
     [0x32, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC]
 }
 
@@ -34,6 +32,7 @@ fn write<'a, ID: CanId + 'a, C: Capacities>(
     id: Id,
     data: [u8; 8],
     tx: &mut mcan::tx_buffers::Tx<'a, ID, C>,
+    mailbox: Option<usize>
 ) -> nb::Result<(), mcan::tx_buffers::Error> {
     let msg = C::TxMessage::new(MessageBuilder {
         id,
@@ -41,12 +40,17 @@ fn write<'a, ID: CanId + 'a, C: Capacities>(
         store_tx_event: None,
     })
     .unwrap();
-    tx.transmit_queued(msg)
+    if let Some(mailbox) = mailbox {
+        tx.transmit_dedicated(mailbox, msg)
+    } else {
+        tx.transmit_queued(msg)
+    }
 }
 
 pub fn make_isotp_endpoint<'a, ID: CanId + 'a, C: Capacities, const N: usize>(
     tx_id: Id,
     rx_id: Id,
+    tx_mailbox: Option<usize>,
     can_tx: &'a Arbiter<mcan::tx_buffers::Tx<'a, ID, C>>,
     ready_signal: &'a Signal<IsotpCtsMsg>,
     rx_signal: &'a Signal<SharedIsoTpBuf<N>>,
@@ -60,6 +64,7 @@ pub fn make_isotp_endpoint<'a, ID: CanId + 'a, C: Capacities, const N: usize>(
         IsoTpInterruptHandler {
             rx_id,
             tx_id,
+            mailbox_dedicated: tx_mailbox,
             rx_ready: tx_rx_ready,
             rx_state: IsoTpMode::Idle,
             can_tx,
@@ -70,6 +75,7 @@ pub fn make_isotp_endpoint<'a, ID: CanId + 'a, C: Capacities, const N: usize>(
             rx_ready: rx_rx_ready,
             can_tx,
             rx_clear_to_send: rx_tx_signal,
+            mailbox_dedicated: tx_mailbox,
         },
     )
 }
@@ -98,6 +104,7 @@ pub fn make_isotp_endpoint<'a, ID: CanId + 'a, C: Capacities, const N: usize>(
 /// ```
 pub struct IsoTpInterruptHandler<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> {
     pub rx_id: Id,
+    pub mailbox_dedicated: Option<usize>,
     tx_id: Id,
     rx_ready: SignalWriter<'a, SharedIsoTpBuf<N>>,
     rx_state: IsoTpMode<N>,
@@ -129,7 +136,7 @@ impl<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> IsoTpInterruptHandl
                         shared_buffer.data[..6].copy_from_slice(&data[2..]);
                         shared_buffer.size = 6;
 
-                        if write(self.tx_id, make_fc_ok(ecu_stmin, ecu_bs), &mut can_tx).is_ok() {
+                        if write(self.tx_id, make_fc_ok(ecu_stmin, ecu_bs), &mut can_tx, self.mailbox_dedicated).is_ok() {
                             self.rx_state = IsoTpMode::Rx {
                                 stmin: ecu_stmin,
                                 bs: ecu_bs,
@@ -164,7 +171,7 @@ impl<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> IsoTpInterruptHandl
                                 .can_tx
                                 .try_access()
                                 .and_then(|mut tx| {
-                                    write(self.tx_id, make_fc_ok(*stmin, *bs), &mut tx).ok()
+                                    write(self.tx_id, make_fc_ok(*stmin, *bs), &mut tx, self.mailbox_dedicated).ok()
                                 })
                                 .is_none()
                             {
@@ -248,6 +255,7 @@ pub struct IsotpConsumer<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize>
     rx_ready: SignalReader<'a, SharedIsoTpBuf<N>>,
     can_tx: &'a Arbiter<mcan::tx_buffers::Tx<'a, ID, C>>,
     rx_clear_to_send: SignalReader<'a, IsotpCtsMsg>,
+    mailbox_dedicated: Option<usize>
 }
 
 impl<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> IsotpConsumer<'a, ID, C, N> {
@@ -261,14 +269,14 @@ impl<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> IsotpConsumer<'a, I
         if buf.len() < 8 {
             tx_buf[0] = buf.len() as u8;
             tx_buf[1..1 + buf.len()].copy_from_slice(buf);
-            write(self.tx_id, tx_buf, &mut *self.can_tx.access().await)?;
+            write(self.tx_id, tx_buf, &mut *self.can_tx.access().await, self.mailbox_dedicated)?;
             Ok(())
         } else {
             // We can send
             tx_buf[0] = 0x10u8 | ((buf.len() >> 8) & 0x0F) as u8;
             tx_buf[1] = (buf.len() & 0xFF) as u8;
             tx_buf[2..].copy_from_slice(&buf[..6]);
-            write(self.tx_id, tx_buf, &mut *self.can_tx.access().await)?;
+            write(self.tx_id, tx_buf, &mut *self.can_tx.access().await, self.mailbox_dedicated)?;
             // Wait for clear to send a block
             let mut pci = 0x21;
             let mut buf_pos = 6;
@@ -303,7 +311,7 @@ impl<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> IsotpConsumer<'a, I
                                     let max_copy = core::cmp::min(7, buf.len() - buf_pos);
                                     tx_buf[1..1 + max_copy]
                                         .copy_from_slice(&buf[buf_pos..buf_pos + max_copy]);
-                                    write(self.tx_id, tx_buf, &mut *self.can_tx.access().await)?;
+                                    write(self.tx_id, tx_buf, &mut *self.can_tx.access().await, self.mailbox_dedicated)?;
                                     buf_pos += max_copy;
                                     if buf_pos == buf.len() {
                                         // Tx complete
@@ -322,6 +330,7 @@ impl<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> IsotpConsumer<'a, I
                                     self.tx_id,
                                     make_fc_reject(),
                                     &mut *self.can_tx.access().await,
+                                    self.mailbox_dedicated
                                 )?;
                                 break 'outer Err(IsoTpTxErr::Rejected);
                             }

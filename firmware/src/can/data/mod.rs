@@ -7,7 +7,7 @@ pub mod hfm;
 pub mod slave_mode;
 
 pub trait SignalFrame {
-    const CAN_ID: embedded_can::Id;
+    const CAN_ID: embedded_can::StandardId;
 
-    fn as_tx_can_msg(&self) -> mcan::message::tx::Message<64>;
+    fn as_tx_can_msg(&self) -> mcan::message::tx::Message<8>;
 }

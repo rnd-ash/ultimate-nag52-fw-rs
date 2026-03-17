@@ -1,6 +1,6 @@
 use atsamd_hal::{clock::v2::pclk, nb, rtic_time::Monotonic};
 use bsp::can_deps::Capacities;
-use mcan::embedded_can;
+use mcan::embedded_can::{self, StandardId};
 
 use crate::{
     can::{
@@ -33,10 +33,11 @@ macro_rules! rxframe_default {
 macro_rules! handle_frames {
     // Self (Can layer), ID - Can  ID, data: CAN Data, match exprs
     ( $self:ident, $id:expr, $data:expr, $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        use crate::can::embedded_can::Id;
         match $id {
             $(
                 // Can frame ID match
-                <$ty>::CAN_ID => {
+                Id::Standard(<$ty>::CAN_ID) => {
                     // write to the field the new CAN frame from data
                     $self.$field.write(
                         <$ty>::new_with_raw_value(u64::from_be_bytes(*$data))
@@ -89,7 +90,13 @@ impl<T: Copy> RxFrame<T> {
     }
 }
 
+pub struct CanFilter {
+    pub id: StandardId,
+    pub mask: StandardId
+}
+
 pub trait CanLayer<I, O> {
+    fn filters(&self) -> &[CanFilter] { &[] }
     fn on_frame(&mut self, id: embedded_can::Id, data: &[u8; 8]);
     fn read_signals(&self, dest: &mut O);
     fn write_signals(&mut self, sigs: &I);
@@ -117,6 +124,10 @@ impl CanLayerTy {
         self.as_can_layer_mut().write_signals(signals);
     }
 
+    pub fn filters(&self) -> &[CanFilter] {
+        self.as_can_layer().filters()
+    }
+
     pub fn transmit(
         &self,
         can_tx: &mut mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>,
@@ -135,4 +146,8 @@ impl CanLayerTy {
             CanLayerTy::Egs52(egs52_can) => egs52_can,
         }
     }
+}
+
+pub fn parity(x: u16) -> bool {
+    x.count_ones() & 1 != 0
 }

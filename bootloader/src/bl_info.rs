@@ -1,22 +1,27 @@
 #![allow(dead_code)]
 use core::ops::Range;
 
-use atsamd_hal::nvm::{self, Nvm};
-use konst::{parsing::Parser, result};
+use atsamd_hal::{
+    aes::typenum::P196,
+    dsu::Dsu,
+    nvm::{
+        self, Nvm,
+        smart_eeprom::{SmartEeprom, SmartEepromState, Unlocked},
+    },
+};
+use konst::{for_range, parsing::Parser, result};
 
 const KB: u32 = 1024;
 const SECTOR_SIZE: u32 = 8192;
 
 const PRELOADER_ADDR_RANGE: Range<u32> = 0..(8 * KB);
-const BOOTLOADER_ADDR_RANGE: Range<u32> = (8 * KB)..(128 * KB);
-const BOOTLOADER_INFO_ADDR_RANGE: Range<u32> = (120 * KB)..(128 * KB);
-const BOOTLOADER_SCRATCH_ADDR_RANGE: Range<u32> = (128 * KB)..(248 * KB);
-const APP_ADDR_RANGE: Range<u32> = (128 * KB)..(1024 * KB);
+const BOOTLOADER_ADDR_RANGE: Range<u32> = (8 * KB)..(120 * KB);
+const BOOTLOADER_SCRATCH_ADDR_RANGE: Range<u32> = (120 * KB)..(240 * KB);
+const APP_ADDR_RANGE: Range<u32> = (120 * KB)..(1024 * KB);
 
 pub enum MemoryRegion {
     Preloader,
     Bootloader,
-    BootloaderInfo,
     BootloaderScratch,
     Application,
 }
@@ -26,7 +31,6 @@ impl MemoryRegion {
         match self {
             MemoryRegion::Preloader => PRELOADER_ADDR_RANGE,
             MemoryRegion::Bootloader => BOOTLOADER_ADDR_RANGE,
-            MemoryRegion::BootloaderInfo => BOOTLOADER_INFO_ADDR_RANGE,
             MemoryRegion::BootloaderScratch => BOOTLOADER_SCRATCH_ADDR_RANGE,
             MemoryRegion::Application => APP_ADDR_RANGE,
         }
@@ -45,13 +49,47 @@ impl MemoryRegion {
 // Ensure everything is aligned to per-page
 static_assertions::const_assert!(PRELOADER_ADDR_RANGE.start % SECTOR_SIZE == 0);
 static_assertions::const_assert!(BOOTLOADER_ADDR_RANGE.start % SECTOR_SIZE == 0);
-static_assertions::const_assert!(BOOTLOADER_INFO_ADDR_RANGE.start % SECTOR_SIZE == 0);
 static_assertions::const_assert!(APP_ADDR_RANGE.start % SECTOR_SIZE == 0);
 
-#[derive(defmt::Format, Clone, Copy, PartialEq, Eq)]
-#[repr(C, packed(4))]
-pub struct BootloaderInfo {
-    pub name: [u8; 8],
+#[derive(defmt::Format, Clone, Copy)]
+pub struct SmartEepromInfo {
+    /// Board production day - Burned to the device via bootloader
+    pub board_prod_day: u8,
+    /// Board production month - Burned to the device via bootloader
+    pub board_prod_month: u8,
+    /// Board production week - Burned to the device via bootloader
+    pub board_prod_week: u8,
+    /// Board production yyear - Burned to the device via bootloader
+    pub board_prod_year: u8,
+    pub preloader_info: CodeSectionInfo,
+    pub bootloader_info: CodeSectionInfo,
+    pub firmware_info: CodeSectionInfo,
+    /// 0 means flashing complete, any other value - Flashing not compelted
+    pub app_flashing_not_done: u8,
+    /// 0 means flashing pending
+    pub bl_flashing_pending: u8,
+    /// CRC32 of app region
+    pub crc32_app: u32,
+    /// CRC32 of Bootloader region
+    pub crc32_bl: u32,
+}
+
+impl SmartEepromInfo {
+    pub fn is_production_date_set(&self) -> bool {
+        self.board_prod_day != 0xFF
+            && self.board_prod_month != 0xFF
+            && self.board_prod_week != 0xFF
+            && self.board_prod_year != 0xFF
+    }
+}
+
+const SMART_EEPROM_INFO_SIZE: usize = core::mem::size_of::<SmartEepromInfo>();
+
+#[derive(defmt::Format, Clone, Copy)]
+#[repr(C, packed)]
+pub struct CodeSectionInfo {
+    pub name: [u8; 10],
+    pub git_sha: [u8; 12],
     pub version_major: u8,
     pub version_minor: u8,
     pub version_patch: u8,
@@ -64,54 +102,82 @@ pub struct BootloaderInfo {
     pub compile_month: u8,
     pub compile_week: u8,
     pub compile_day: u8,
-    pub app_flashing_not_done: u8,
-    pub application_crc: u32,
-    /// 0 = Pending copy (Check CRC)
-    /// 1 = No pending copy (No update)
-    pub bootloader_flashing_pending: u8,
-    pub bootloader_flashing_crc: u32,
+    pub is_debug: u8,
 }
 
-static_assertions::const_assert!(size_of::<BootloaderInfo>() < SECTOR_SIZE as usize);
+impl CodeSectionInfo {
+    pub fn clear(&mut self) {
+        self.version_major = 0xFF;
+        self.version_minor = 0xFF;
+        self.version_patch = 0xFF;
+        self.rustc_version_major = 0xFF;
+        self.rustc_version_minor = 0xFF;
+        self.rustc_version_patch = 0xFF;
+        self.compile_day = 0xFF;
+        self.compile_month = 0xFF;
+        self.compile_week = 0xFF;
+        self.compile_year = 0xFF;
+    }
+}
 
-const fn parse_u8(s: &str) -> u8 {
+impl PartialEq for CodeSectionInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.version_major == other.version_major
+            && self.version_minor == other.version_minor
+            && self.version_patch == other.version_patch
+            && self.rustc_version_major == other.rustc_version_major
+            && self.rustc_version_minor == other.rustc_version_minor
+            && self.rustc_version_patch == other.rustc_version_patch
+            && self.compile_year == other.compile_year
+            && self.compile_month == other.compile_month
+            && self.compile_week == other.compile_week
+            && self.compile_day == other.compile_day
+    }
+}
+
+pub const fn parse_u8(s: &str) -> u8 {
     let mut p = Parser::new(s);
     result::unwrap!(p.parse_u8())
 }
 
-#[cfg(not(feature = "lib"))]
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".bl_info")]
-static BOOTLOADER_INFO: BootloaderInfo = BootloaderInfo {
-    name: *b"UN52 xGS",
-    version_major: parse_u8(env!("CARGO_PKG_VERSION_MAJOR")),
-    version_minor: parse_u8(env!("CARGO_PKG_VERSION_MINOR")),
-    version_patch: parse_u8(env!("CARGO_PKG_VERSION_PATCH")),
-    compile_year: parse_u8(env!("BUILD_YEAR")),
-    compile_month: parse_u8(env!("BUILD_MONTH")),
-    compile_week: parse_u8(env!("BUILD_WEEK")),
-    compile_day: parse_u8(env!("BUILD_DAY")),
-    rustc_version_major: parse_u8(env!("RUSTC_VER_MAJOR")),
-    rustc_version_minor: parse_u8(env!("RUSTC_VER_MINOR")),
-    rustc_version_patch: parse_u8(env!("RUSTC_VER_PATCH")),
-    app_flashing_not_done: 1,
-    application_crc: 0xFFFF_FFFF,
-    bootloader_flashing_pending: 1,
-    bootloader_flashing_crc: 0xFFFF_FFFF,
-};
+const GIT_SHA_LEN: usize = 12;
+pub const fn parse_git_sha(s: &str) -> [u8; GIT_SHA_LEN] {
+    let mut out = [0; GIT_SHA_LEN];
 
-#[inline(always)]
-pub fn region_crc(addr_range: Range<u32>) -> u32 {
-    let start = core::ptr::slice_from_raw_parts(addr_range.start as *mut u8, addr_range.len());
-    unsafe { embedded_crc32c::crc32c(start.as_ref().unwrap()) }
+    let mut chars = konst::string::chars(s);
+    for_range! { i in 0..GIT_SHA_LEN =>
+        out[i] = chars.next().unwrap() as u8
+    }
+    out
+}
+
+#[cfg(not(feature = "lib"))]
+pub const fn create_code_info(name: [u8; 10]) -> CodeSectionInfo {
+    CodeSectionInfo {
+        name,
+        git_sha: parse_git_sha(env!("VERGEN_GIT_SHA")),
+        version_major: parse_u8(env!("CARGO_PKG_VERSION_MAJOR")),
+        version_minor: parse_u8(env!("CARGO_PKG_VERSION_MINOR")),
+        version_patch: parse_u8(env!("CARGO_PKG_VERSION_PATCH")),
+        compile_year: parse_u8(env!("BUILD_YEAR")),
+        compile_month: parse_u8(env!("BUILD_MONTH")),
+        compile_week: parse_u8(env!("BUILD_WEEK")),
+        compile_day: parse_u8(env!("BUILD_DAY")),
+        rustc_version_major: parse_u8(env!("RUSTC_VER_MAJOR")),
+        rustc_version_minor: parse_u8(env!("RUSTC_VER_MINOR")),
+        rustc_version_patch: parse_u8(env!("RUSTC_VER_PATCH")),
+        #[cfg(debug_assertions)]
+        is_debug: 1,
+        #[cfg(not(debug_assertions))]
+        is_debug: 0,
+    }
 }
 
 #[inline(always)]
-pub fn get_bootloader_info() -> &'static BootloaderInfo {
-    unsafe {
-        let ptr = BOOTLOADER_INFO_ADDR_RANGE.start as *const BootloaderInfo;
-        ptr.as_ref().unwrap()
-    }
+pub fn region_crc(addr_range: Range<u32>, dsu: &mut Dsu) -> u32 {
+    dsu.crc32(addr_range.start, addr_range.len() as u32)
+        .unwrap_or(0)
 }
 
 /// Modify the bootloader info page in NVM memory
@@ -120,34 +186,25 @@ pub fn get_bootloader_info() -> &'static BootloaderInfo {
 /// This function erases the info page and then writes it back, therefore
 /// if power loss occurs during erase, then the bootloader info section
 /// will be corrupt
-pub unsafe fn mutate_bootloader_info<F: FnOnce(&mut BootloaderInfo)>(
-    nvm: &mut Nvm,
+pub fn mutate_smarteeprom_info<'a, F: FnOnce(&mut SmartEepromInfo)>(
+    seeprom: &mut SmartEeprom<'a, Unlocked>,
     f: F,
-) -> nvm::Result<()> {
-    let bl_state = *get_bootloader_info();
-    let mut modified = bl_state;
-    f(&mut modified);
-    if modified != bl_state {
-        let start_addr = BOOTLOADER_INFO_ADDR_RANGE.start;
-        let size = core::mem::size_of::<BootloaderInfo>() / 4;
-        let mut read: [u32; SECTOR_SIZE as usize / 4] = [0; _];
-        // Copy the page to a temp buffer
-        core::ptr::copy_nonoverlapping(
-            start_addr as *mut u32,
-            read.as_mut_ptr(),
-            SECTOR_SIZE as usize / size_of::<u32>(),
-        );
-        let to_copy =
-            core::ptr::slice_from_raw_parts(&modified as *const BootloaderInfo as *const u32, size);
-        read[..size].copy_from_slice(to_copy.as_ref().unwrap());
+) -> SmartEepromInfo {
+    let mut s = [0u8; SMART_EEPROM_INFO_SIZE];
+    seeprom.get(0, &mut s);
+    let ptr_s = s.as_mut_ptr() as *mut SmartEepromInfo;
+    let mut_s = unsafe { ptr_s.as_mut().unwrap() };
+    f(mut_s);
+    seeprom.set(0, &s);
+    *mut_s
+}
 
-        // Erase the page
-        nvm.erase_flash(start_addr as *mut u32, 1)?;
-        nvm.write_flash_from_slice(
-            start_addr as *mut u32,
-            &read,
-            atsamd_hal::nvm::WriteGranularity::Page,
-        )?;
-    }
-    Ok(())
+pub fn get_smarteeprom_info<'a, T: SmartEepromState>(
+    seeprom: &SmartEeprom<'a, T>,
+) -> SmartEepromInfo {
+    let mut s = [0u8; SMART_EEPROM_INFO_SIZE];
+    seeprom.get(0, &mut s);
+    let ptr_s = s.as_mut_ptr() as *mut SmartEepromInfo;
+    let ref_s = unsafe { ptr_s.as_ref().unwrap() };
+    *ref_s
 }

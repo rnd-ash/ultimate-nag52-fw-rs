@@ -1,36 +1,28 @@
-use core::f32::consts::PI;
-
 use arbitrary_int::{traits::Integer, u11, u12, u14, u19, u5};
 use atsamd_hal::{
-    bind_multiple_interrupts,
     clock::Tcc0Tcc1Clock,
     dmac,
     ehal::digital::OutputPin,
     ehal_async::spi::SpiBus,
     fugit::ExtU64,
-    gpio::{AlternateG, PA20},
-    pac::{Mclk, Peripherals, Tcc0},
+    gpio::{AlternateF, PC21},
+    pac::{Mclk, Tcc0},
     prelude::_embedded_hal_Pwm,
     pwm::{Channel, TCC0Pinout, Tcc0Pwm},
     rtic_time::Monotonic,
     sercom::{
-        dma,
-        spi::{self, SpiFutureDuplex, SpiFutureDuplexDma},
-        Sercom6,
+        spi::{self, SpiFutureDuplexDma},
     },
     time::Hertz,
 };
-use bsp::{LedTleAct, TleClk, TleCs, TleEnable, TleFault, TlePhaseSync, TleReset, TleSpiPads};
-use cortex_m::asm::{self, nop};
-use defmt::println;
-use num_traits::Pow;
+use bsp::{LedTle, TleClk, TleCs, TleEn, TleFault, TlePhaseSync, TleReset, TleSpiPads};
 
 use crate::{
     solenoids::{
         commands::{
-            AutoZeroTriggerRead, AverageCurrentRead, ControlMode, ControlVarsSet,
+            AutoZeroTriggerRead, AverageCurrentRead, ControlVarsSet,
             CtrlMethodFaultMaskCfg, CurrentDitherAmpSet, DiagnosticTimer, DitherPeriodSet,
-            DividerM, IcVersion, MainPeriodSet, PwmDutyCycle, ShortToBatThreshold, TleChannel,
+            IcVersion, MainPeriodSet, PwmDutyCycle, ShortToBatThreshold, TleChannel,
             TleMsg,
         },
         solenoid_ctrl::Mode,
@@ -42,21 +34,20 @@ pub struct Tle8242Pins {
     pub phase_sync: TlePhaseSync,
     pub fault: TleFault,
     pub reset: TleReset,
-    pub enable: TleEnable,
+    pub enable: TleEn,
     pub clk: TleClk,
     pub cs: TleCs,
-    pub led: LedTleAct,
+    pub led: LedTle,
 }
 
 pub const TLE8242_CLK_FREQ: Hertz = Hertz::MHz(40);
-const TCC0_CHANNEL_TLE: Channel = Channel::_0; // TCC0 WO[0] as per the datasheet
+const TCC0_CHANNEL_TLE: Channel = Channel::_5; // TCC0 WO[5] as per the datasheet
 
 // T4 (Sck rise to rise time) is 100ns (10Mhz)
 pub const TLE_SPI_BAUD: Hertz = Hertz::MHz(10);
 
 // Values for Rsense
 pub const R_SENSE_VAL: f32 = 0.05; // Ohms
-const R_SENSE_EQ_VAL: f32 = 0.320 / 0.05;
 
 #[derive(Copy, Clone)]
 pub struct ChannelProps {
@@ -86,13 +77,13 @@ impl TleConfiguration {
 
 pub struct Tle8242<T: dmac::ChId, R: dmac::ChId> {
     spi: SpiFutureDuplexDma<spi::Config<TleSpiPads>, T, R>,
-    pwm: Tcc0Pwm<PA20, AlternateG>,
+    pwm: Tcc0Pwm<PC21, AlternateF>,
     pin_phase_sync: TlePhaseSync,
     pin_fault: TleFault,
     pin_reset: TleReset,
-    pin_enable: TleEnable,
+    pin_enable: TleEn,
     pin_cs: TleCs,
-    pin_led: LedTleAct,
+    pin_led: LedTle,
     config: TleConfiguration,
 }
 
@@ -104,7 +95,7 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
         clock: &Tcc0Tcc1Clock,
         tcc0: Tcc0,
     ) -> Self {
-        let pinout = TCC0Pinout::Pa20(pins.clk);
+        let pinout = TCC0Pinout::Pc21(pins.clk);
         let mut tcc = Tcc0Pwm::new(clock, TLE8242_CLK_FREQ, tcc0, pinout, mclk);
         let midpoint = tcc.get_max_duty() / 2;
         tcc.set_duty(TCC0_CHANNEL_TLE, midpoint);
@@ -135,7 +126,7 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
         Mono::delay(1u64.millis()).await;
         self.pin_phase_sync.set_low().unwrap();
 
-        // Sanity check - Get version  info
+        // Sanity check - Get version info
         let tle_ver = IcVersion::new_with_id();
         if self.xfer(tle_ver).await.is_none() {
             // TODO - Panic or stop init if this happens (TLE is not responding)
@@ -262,7 +253,7 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
             if msg.id_match(resp_u32) {
                 Some(u32::from_be_bytes(read_buf).into())
             } else {
-                defmt::error!("CMD ID Mismatch");
+                defmt::error!("CMD ID Mismatch. Got {:02X}", read_buf);
                 None
             }
         } else {

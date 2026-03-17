@@ -22,39 +22,44 @@ atsamd_hal::bsp_peripherals!(
 
 atsamd_hal::bsp_pins!(
     // -- PORT A -- //
-    // PA00 - NC
-    // PA01 - NC
-    PA02 {
-        name: tft
+    PA00 {
+        name: start_en
         aliases: {
-            AlternateB: Tft
+            PushPullOutput: StartEn
         }
     },
-    PA03 {
-        name: sol_pwr_sense,
+    PA01 {
+        name: start_en_diag
         aliases: {
-            AlternateB: SolPwrSense
+            PushPullOutput: StartEnDiag
         }
     },
+    // PA02 - NC
+    // PA03 - NC
     PA04 {
-        name: lin_rx
+        name: kline_rx
         aliases: {
-            AlternateD: LinRx
+            AlternateD: KlineRx
         }
     },
     PA05 {
-        name: lin_tx
+        name: kline_tx
         aliases: {
-            AlternateD: LinTx
+            AlternateD: KlineTx
         }
     }
     PA06 {
-        name: rpm_2
+        name: tsen_tle8242
         aliases: {
-            AlternateE: Rpm2
+            AlternateB: TsenTle8242
         }
     }
-    // PA07 - NC
+    PA07 {
+        name: tsen_pcb
+        aliases: {
+            AlternateB: TsenPcb
+        }
+    }
     PA08 {
         name: extflash_data0
         aliases: {
@@ -91,38 +96,22 @@ atsamd_hal::bsp_pins!(
             AlternateC: EepromSCL
         }
     },
-    PA14 {
-        name: rpm_n3
-        aliases: {
-            PushPullOutput: RpmN3
-        }
-    },
+    // PA14 - NC
     // PA15 - NC
-    PA16 {
-        name: rpm_n2
-        aliases: {
-            PushPullOutput: RpmN2
-        }
-    },
+    // PA16 - NC
     // PA17 - NC
     // PA18 - NC
-    PA19 {
-        name: tle_enable
-        aliases: {
-            PushPullOutput: TleEnable
-        }
-    },
+    // PA19 - NC
     PA20 {
-        name: tle_clk
+        name: power_en_sol
         aliases: {
-            PushPullOutput: TleClk,
-            AlternateG: TleClkG
+            PushPullOutput: PowerEnSol,
         }
     },
     PA21 {
-        name: sol_pwr_en
+        name: power_en_sensors
         aliases: {
-            PushPullOutput: SolPwrEn
+            PushPullOutput: PowerEnSen
         }
     },
     PA22 {
@@ -149,40 +138,73 @@ atsamd_hal::bsp_pins!(
             AlternateH: UsbDp
         }
     },
-    PA27 {
-        name: prg_btn_sense
-        aliases: {
-            PushPullOutput: PrgBtnSense
-        }
-    },
+    // PA26 - NC
+    // PA27 - NC
     // PA30 - DBG
-    PA31 {
-        // Special pin (Usually debug)
-        // but the bootloader uses it to check
-        // if it should stay in loader mode
-        name: bootloader_check
-    }
+    // PA31 - DBG
+
     // -- PORT B -- //
-    // PB00 - NC
-    // PB01 - NC
-    // PB02 - NC
-    // PB03 - NC
+    PB00 {
+        name: trss_3
+        aliases: {
+            PushPullOutput: Trss3,
+        }
+    },
+    PB01 {
+        name: trss_2
+        aliases: {
+            PushPullOutput: Trss2,
+        }
+    },
+    PB02 {
+        name: trss_1
+        aliases: {
+            PushPullOutput: Trss1,
+        }
+    },
+    PB03 {
+        name: trss_0
+        aliases: {
+            PushPullOutput: Trss0,
+        }
+    },
     PB04 {
-        name: vsol_sense
+        name: tft
         aliases: {
-            AlternateB: VsolSense
+            AlternateB: Tft
         }
     },
-    // PB05 - NC
-    // PB06 - NC
-    // PB07 - NC
+    PB05 {
+        name: gpio_sig_1
+        aliases: {
+            PushPullOutput: GpioRpm1
+            AlternateB: GpioAnalog1
+        }
+    },
+    PB06 {
+        name: accel_m_or_brake
+        aliases: {
+            AlternateB: AccelMOrBrake
+        }
+    },
+    PB07 {
+        name: accel_p
+        aliases: {
+            AlternateB: AccelP
+        }
+    },
     PB08 {
-        name: rpm_1
+        name: pmon_kl15
         aliases: {
-            PushPullOutput: Rpm1
+            AlternateB: PmonKl15
         }
     },
-    // PB09 - NC
+    PB09 {
+        name: pmon_kl87
+        aliases: {
+            AlternateB: PmonKl87
+        }
+    },
     PB10 {
         name: extflash_sck
         aliases: {
@@ -195,39 +217,39 @@ atsamd_hal::bsp_pins!(
             AlternateH: ExtFlashCs
         }
     },
-    // PB12 - NC
-    PB13 {
+    PB12 {
         name: spkr
         aliases: {
             AlternateG: Spkr
         }
     },
-    PB14 {
-        name: rpm_3
-        aliases: {
-            AlternateG: Rpm3
-        }
-    },
+    // PB13 - NC
+    // PB14 - NC
     // PB15 - NC
     PB16 {
-        name: tcc_cutoff
-        aliases: {
-            PushPullOutput: TccCutoff
-        }
-    },
-    PB17 {
-        name: tcc_fdbk
-        aliases: {
-            PushPullOutput: TccFdbk
-        }
-    },
-    PB18 {
         name: tcc_pwm
         aliases: {
             AlternateF: TccPwm
         }
     },
-    // PB19 - NC
+    PB17 {
+        name: tcc_cutoff
+        aliases: {
+            PushPullOutput: TccCutoff
+        }
+    },
+    PB18 {
+        name: rpm_n2
+        aliases: {
+            PushPullOutput: RpmN2
+        }
+    },
+    PB19 {
+        name: rpm_n3
+        aliases: {
+            PushPullOutput: RpmN3
+        }
+    },
     // PB20 - NC
     // PB21 - NC
     // PB22 - NC
@@ -236,45 +258,67 @@ atsamd_hal::bsp_pins!(
     // PB25 - NC
     // PB26 - NC
     // PB27 - NC
-    PB28 {
-        name: sensor_pwr_en
-        aliases: {
-            PushPullOutput: SensorPwrEn
-        }
-    },
-    PB29 {
-        name: start_ctrl
-        aliases: {
-            PushPullOutput: StartCtrl
-        }
-    },
+    // PB28 - NC
+    // PB29 - NC
     // PB30 - DBG
     // PB31 - DBG
+
     // -- PORT C -- //
-    // PC00 - NC
-    // PC01 - NC
-    PC02 {
-        name: accel_p_sense
+    PC00 {
+        name: trrs_prg
         aliases: {
-            AlternateB: AccelPSense
+            PushPullOutput: TrrsPrg
+        }
+    },
+    PC01 {
+        name: kickdown
+        aliases: {
+            PushPullOutput: Kickdown
+        }
+    },
+    PC02 {
+        name: pmon_sensors
+        aliases: {
+            AlternateB: PmonSensors
         }
     },
     PC03 {
-        name: accel_m_sense
+        name: pmon_kl87_diag
         aliases: {
-            AlternateB: AccelMSense
+            AlternateB: PmonKl87Diag
         }
     },
     PC04 {
-        name: lin_slp
+        name: scale_drp_gpio1
         aliases: {
-            PushPullOutput: LinSlp
+            PushPullOutput: ScaleDrpGpio1
         }
     },
-    // PC05 - NC
-    // PC06 - NC
-    // PC07 - NC
-    // PC10 - NC
+    PC05 {
+        name: scale_drp_gpio2
+        aliases: {
+            PushPullOutput: ScaleDrpGpio2
+        }
+    },
+    PC06 {
+        name: scale_drp_gpio3
+        aliases: {
+            PushPullOutput: ScaleDrpGpio3
+        }
+    },
+    PC07 {
+        name: scale_drp_acm
+        aliases: {
+            PushPullOutput: ScaleDrpAcm
+        }
+    },
+
+    PC10 {
+        name: led_stat_ok
+        aliases: {
+            PushPullOutput: LedStatOk,
+        }
+    },
     // PC11 - NC
     // PC12 - NC
     // PC13 - NC
@@ -310,6 +354,12 @@ atsamd_hal::bsp_pins!(
             PushPullOutput: TleFault
         }
     },
+    PC21 {
+        name: tle_clk
+        aliases: {
+            AlternateF: TleClk
+        }
+    },
     // PC21 - NC
     PC22 {
         name: tle_reset,
@@ -323,56 +373,35 @@ atsamd_hal::bsp_pins!(
             PushPullOutput: TlePhaseSync
         }
     },
-    PC24 {
-        name: brake_sense
-        aliases: {
-            PushPullOutput: BrakeSense
-        }
-    },
-    PC25 {
-        name: trss_a_sense
-        aliases: {
-            PushPullOutput: TrrsASense
-        }
-    },
-    PC26 {
-        name: trss_b_sense
-        aliases: {
-            PushPullOutput: TrrsBSense
-        }
-    },
-    PC27 {
-        name: trss_c_sense
-        aliases: {
-            PushPullOutput: TrrsCSense
-        }
-    },
-    PC28 {
-        name: trss_d_sense
-        aliases: {
-            PushPullOutput: TrrsDSense
-        }
-    },
-    PC30 {
-        name: vbatt_sense
-        aliases: {
-            AlternateB: VBattSense
-        }
-    },
-    PC31 {
-        name: vsensor_sense
-        aliases: {
-            AlternateB: VSensorSense
-        }
-    }
+    // PC24 - NC
+    // PC25 - NC
+    // PC26 - NC
+    // PC27 - NC
+    // PC28 - NC
+    // PC29 - NC
+    // PC30 - NC
+    // PC31 - NC
+
     // -- PORT D -- //
-    // PD00 - NC
-    // PD01 - NC
-    PD08 {
-        name: led_status
+    PD00 {
+        name: gpio_sig_2
         aliases: {
-            PushPullOutput: LedStatus
-            AlternateF: PulsingStatus
+            PushPullOutput: GpioRpm2
+            AlternateB: GpioAnalog2
+        }
+    },
+    PD01 {
+        name: gpio_sig_3
+        aliases: {
+            PushPullOutput: GpioRpm3
+            AlternateB: GpioAnalog3
+        }
+    },
+
+    PD08 {
+        name: led_eeprom
+        aliases: {
+            PushPullOutput: LedEeprom
         }
     },
     PD09 {
@@ -382,23 +411,37 @@ atsamd_hal::bsp_pins!(
         }
     },
     PD10 {
-        name: led_eeprom
+        name: led_qspi
         aliases: {
-            PushPullOutput: LedEeprom
+            PushPullOutput: LedQspi
         }
     },
     PD11 {
-        name: led_ext_flash
+        name: led_tle
         aliases: {
-            PushPullOutput: LedExtFlash
+            PushPullOutput: LedTle
         }
     },
     PD12 {
-        name: led_tle_act
+        name: led_stat_err
         aliases: {
-            PushPullOutput: LedTleAct
+            PushPullOutput: LedStatErr,
+            AlternateF: LedStatErrPwm
         }
     },
+
+    PD20 {
+        name: tle_en
+        aliases: {
+            PushPullOutput: TleEn
+        }
+    }
+    PD21 {
+        name: tcc_fdbk
+        aliases: {
+            PushPullOutput: TccFdbk
+        }
+    }
 );
 
 pub fn ext_flash(
@@ -427,7 +470,8 @@ pub fn ext_flash(
 pub type EepromPads = i2c::Pads<Sercom2, EepromSDA, EepromSCL>;
 pub type EepromI2c = i2c::I2c<i2c::Config<EepromPads>>;
 
-pub fn eeprom(
+pub fn eeprom<Gclk: GclkId>(
+    pclk_sercom2: Pclk<Sercom2, Gclk>,
     sercom: EepromSercom,
     baud: Hertz,
     mclk: &mut Mclk,
@@ -435,7 +479,9 @@ pub fn eeprom(
     scl: impl Into<EepromSCL>,
 ) -> EepromI2c {
     let pads = i2c::Pads::new(sda.into(), scl.into());
-    i2c::Config::new(mclk, sercom, pads, baud).enable()
+    i2c::Config::new(mclk, sercom, pads, pclk_sercom2.freq())
+        .baud(baud)
+        .enable()
 }
 
 pub type TleSpiPads = spi::Pads<TleSercom, TleSo, TleSi, TleSck>;

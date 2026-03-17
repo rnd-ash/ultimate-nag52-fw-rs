@@ -31,9 +31,7 @@
 use atsamd_hal::pac::Evsys;
 use atsamd_hal::pac::Mclk;
 use atsamd_hal::with_num_channels;
-use atsamd_hal_macros::hal_cfg;
 use core::marker::PhantomData;
-use defmt::println;
 use seq_macro::seq;
 
 pub trait Status {}
@@ -130,6 +128,16 @@ impl<Id: ChId, GEN: EvSysGenerator, USR: EvSysUser> EvSysChannel<Id, Ready<GEN, 
             .user(USR::USER_ID)
             .write(|w| unsafe { w.channel().bits(0) });
         self.change_status()
+    }
+
+    pub fn user_ready(&self) -> bool {
+        let reg = self.evsys.channels(Id::ID as usize);
+        reg.chstatus().read().rdyusr().bit_is_set()
+    }
+
+    pub fn busy(&self) -> bool {
+        let reg = self.evsys.channels(Id::ID as usize);
+        reg.chstatus().read().busych().bit_is_set()
     }
 }
 

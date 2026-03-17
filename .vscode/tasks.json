@@ -1,0 +1,50 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build preloader",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--target=thumbv7em-none-eabihf",
+                "--release",
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/preloader/"
+            },
+        },
+        {
+            "label": "Build bootloader",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--target=thumbv7em-none-eabihf",
+                "--release",
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/bootloader/",
+                "env": {
+                    "DEFMT_LOG": "info"
+                }
+            },
+        },
+        {
+            "label": "Build firmware",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--target=thumbv7em-none-eabihf",
+                "--release",
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/",
+                "env": {
+                    "DEFMT_LOG": "info"
+                }
+            },
+        }
+    ]
+}

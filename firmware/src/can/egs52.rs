@@ -1,6 +1,6 @@
 use atsamd_hal::clock::v2::pclk;
 use bsp::can_deps::Capacities;
-use mcan::tx_buffers::DynTx;
+use mcan::{message::Raw, tx_buffers::DynTx};
 
 pub use super::data::egs_52::*;
 use crate::{
@@ -46,6 +46,7 @@ impl CanLayer<CanTxSignals, CanRxSignals> for Egs52Can {
         &self,
         can_tx: &mut mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>,
     ) -> atsamd_hal::nb::Result<(), mcan::tx_buffers::Error> {
+        // Set toggle bits and counters
         can_tx.transmit_queued(self.gs218.as_tx_can_msg())?;
         can_tx.transmit_queued(self.gs418.as_tx_can_msg())?;
         can_tx.transmit_queued(self.gs338.as_tx_can_msg())?;
@@ -59,7 +60,11 @@ impl CanLayer<CanTxSignals, CanRxSignals> for Egs52Can {
         }
     }
 
-    fn write_signals(&mut self, sigs: &CanTxSignals) {}
+    fn write_signals(&mut self, sigs: &CanTxSignals) {
+        // Finally, calculate parity and counters
+        self.gs218.set_mtgl_egs(!self.gs218.mtgl_egs());
+        //self.gs218.set_mpar_egs();
+    }
 
     fn on_frame(&mut self, id: mcan::embedded_can::Id, data: &[u8; 8]) {
         handle_frames!(

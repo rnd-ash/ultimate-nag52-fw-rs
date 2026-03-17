@@ -24,4 +24,4 @@ panic = "abort"
 
 [target.thumbv7em-none-eabihf]
 # Uncomment out the speed if you are not using MPLAB Snap
-runner = 'probe-rs run --chip ATSAME54P20A --protocol swd --speed 48000'
+runner = 'probe-rs run --protocol swd --chip ATSAME54P20A'

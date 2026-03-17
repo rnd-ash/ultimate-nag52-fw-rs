@@ -9,7 +9,6 @@ pub const MAX_RESET_COUNT: u8 = 5;
 struct BootloaderCommInfo {
     crc: u32,
     state: BootloaderRamInfo,
-    crc_not: u32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -29,6 +28,8 @@ pub struct BootloaderRamInfo {
     pub diag_request_bootloader: (bool, Option<(u8, u8)>),
     /// Panic information from the app if the app panicked
     pub app_panic: Option<AppPanicInfo>,
+    /// Ram failure error (Address, bit#, test stage)
+    pub ram_failure: Option<(u32, u8, u8)>
 }
 
 // Ensure we don't overflow in RAM
@@ -40,7 +41,7 @@ const BOOTLOADER_COMM_ADDR: *mut BootloaderCommInfo = 0x20010000 as *mut Bootloa
 pub fn get_bootloader_comm_info() -> Option<BootloaderRamInfo> {
     let bl_ram: &BootloaderCommInfo = unsafe { BOOTLOADER_COMM_ADDR.as_ref().unwrap() };
     let crc = crc_of_bootloader_state(&bl_ram.state);
-    if crc == bl_ram.crc && crc.not() == bl_ram.crc_not {
+    if crc == bl_ram.crc {
         Some(bl_ram.state)
     } else {
         None
@@ -52,7 +53,6 @@ pub fn create_default_comm_info() {
     pre.state = Default::default();
     let crc = crc_of_bootloader_state(&pre.state);
     pre.crc = crc;
-    pre.crc_not = crc.not();
 }
 
 pub fn modify_bootloader_info<F: FnOnce(&mut BootloaderRamInfo)>(f: F) {
@@ -60,7 +60,6 @@ pub fn modify_bootloader_info<F: FnOnce(&mut BootloaderRamInfo)>(f: F) {
     f(&mut pre.state);
     let crc = crc_of_bootloader_state(&pre.state);
     pre.crc = crc;
-    pre.crc_not = crc.not();
 }
 
 fn crc_of_bootloader_state(state: &BootloaderRamInfo) -> u32 {

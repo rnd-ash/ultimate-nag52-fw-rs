@@ -1,9 +1,6 @@
-use atsamd_hal::adc::{AdcPin, CpuVoltageSource, SampleCount};
-use atsamd_hal::gpio::{AnyPin, PA00, PB03};
-use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::{
     adc::{
-        Accumulation, Adc0, Adc1, AdcBuilder, AdcResolution, FutureAdc, InterruptHandler,
+        Accumulation, Adc0, Adc1, AdcBuilder, AdcResolution, FutureAdc,
         Prescaler, Reference,
     },
     clock::{
@@ -11,55 +8,55 @@ use atsamd_hal::{
         v2::{
             apb::ApbClk,
             gclk::GclkId,
-            pclk::{Pclk, PclkId},
+            pclk::{Pclk},
         },
     },
     pac::{self, Supc},
 };
-use bsp::{AccelMSense, AccelPSense, SolPwrSense, Tft, VBattSense, VSensorSense, VsolSense};
-use defmt::{info, println};
 
-use crate::maths::FirstOrderAverage;
-use crate::{maths, Adc0Irqs, Adc1Irqs, Mono};
+use defmt::{println};
+use futures::join;
 
+use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
+use crate::{Adc0Irqs, Adc1Irqs, maths};
+
+pub mod adc;
 pub mod speed_sensors;
+pub mod variable_adc_input;
 
-// All values here are from 0-4095 (12bit ADC reading)
-pub struct AnalogSensors {
-    /// Feedback of the 5V sensor supply
-    vsense_feedback: FirstOrderAverage<u16, 10>,
-    /// Feedback of the KL15 terminal
-    vbatt_feedback: FirstOrderAverage<u16, 10>,
-    /// Accelerator + Input voltage
-    accel_p_sense: FirstOrderAverage<u16, 10>,
-    /// Accelerator - Input voltage
-    accel_m_sense: FirstOrderAverage<u16, 10>,
-    /// TFT Sensor on the valve body
-    tft: FirstOrderAverage<u16, 10>,
-    /// Linear feedback from high side switch for solenoids
-    sol_pwr_sense: FirstOrderAverage<u16, 10>,
-    /// Voltage feedback of the solenoid supply (KL87)
-    vsol_sense: FirstOrderAverage<u16, 10>,
-}
-
-
-pub struct AdcPins {
-    pub vbatt_sense: VBattSense,
-    pub vsensor_sense: VSensorSense,
-    pub accel_plus: AccelPSense,
-    pub accel_minus: AccelMSense,
-    pub tft: Tft,
-    pub sol_pwr_sense: SolPwrSense,
-    pub vsol_sense: VsolSense,
+#[derive(Default, Copy, Clone)]
+pub enum TftState {
+    /// Parking lock engaged (No temperature)
+    #[default]
+    Pll,
+    // Temperature in Celcius
+    Temperature(i8),
 }
 
 #[derive(Default, Copy, Clone)]
 pub struct SensorData {
-    pub tft: TftSensorReading,
-    /// Units: millivolts
-    pub vbatt: u16,
-    pub n2_rpm: u16,
-    pub n3_rpm: u16,
+    /// TFT Sensor state
+    pub tft: TftState,
+    /// KL15 voltage (mV)
+    pub vkl15: u16,
+    /// Sensors voltage (mV)
+    pub vsense: u16,
+    /// KL87 voltage (mV)
+    pub vkl87: u16,
+    /// KL87 current (mA)
+    pub ikl87: u16,
+    /// Temperature of PCB near external connector (C)
+    pub t_pcb: i8,
+    /// Temperature of PCB near TLE8242 IC (C)
+    pub t_tle: i8,
+}
+
+/// Assume ADC reading is 0-4095 (=0-3.3V)
+/// R1 and R2 are in Ohms
+pub fn adc_reading_to_source(adc: u16, r1: u32, r2: u32) -> u16 {
+    let div = (r2 * 1000) / (r1 + r2);
+    let v_out = 3300 * (((adc as u32) * 1000) / 4095);
+    (v_out / div) as u16
 }
 
 pub struct AdcData {
@@ -67,8 +64,9 @@ pub struct AdcData {
     adc1: FutureAdc<Adc1, Adc1Irqs>,
     /// Required for reading the board temperature
     supc: Supc,
-    /// Pins required
-    pins: AdcPins,
+    adc0_pins: Adc0Pins,
+    adc1_pins: Adc1Pins,
+    adc1_variable_inputs: Adc1VariableInputs,
 }
 
 impl AdcData {
@@ -76,7 +74,9 @@ impl AdcData {
         adc0: pac::Adc0,
         adc1: pac::Adc1,
         supc: Supc,
-        pins: AdcPins,
+        adc0_pins: Adc0Pins,
+        adc1_pins: Adc1Pins,
+        adc1_variable_inputs: Adc1VariableInputs,
         apb_adc0: ApbClk<clock::v2::pclk::ids::Adc0>,
         apb_adc1: ApbClk<clock::v2::pclk::ids::Adc1>,
         pclk_adc0: Pclk<clock::v2::pclk::ids::Adc0, P>,
@@ -89,14 +89,14 @@ impl AdcData {
         let adc_adc0 = AdcBuilder::new(Accumulation::Single(AdcResolution::_12))
             .with_vref(Reference::Intvcc1)
             .with_clock_divider(Prescaler::Div8)
-            .with_clock_cycles_per_sample(16)
+            .with_clock_cycles_per_sample(32)
             .enable(adc0, apb_adc0, &pclk_adc0)
             .unwrap()
             .into_future(Adc0Irqs);
         let adc_adc1 = AdcBuilder::new(Accumulation::Single(AdcResolution::_12))
             .with_vref(Reference::Intvcc1)
             .with_clock_divider(Prescaler::Div8)
-            .with_clock_cycles_per_sample(16)
+            .with_clock_cycles_per_sample(32)
             .enable(adc1, apb_adc1, &pclk_adc1)
             .unwrap()
             .into_future(Adc1Irqs);
@@ -104,113 +104,131 @@ impl AdcData {
             adc0: adc_adc0,
             adc1: adc_adc1,
             supc,
-            pins,
+            adc0_pins,
+            adc1_pins,
+            adc1_variable_inputs,
         }
     }
 
-    /// Assume ADC reading is 0-4095 (=0-3.3V)
-    /// R1 and R2 are in Ohms
-    pub fn adc_reading_to_source(adc: u16, r1: u32, r2: u32) -> u16 {
-        let div = (r2 * 1000) / (r1 + r2);
-        let v_out = 3300 * (((adc as u32) * 1000) / 4096);
-        (v_out / div) as u16
-    }
-
     pub async fn update(&mut self) -> SensorData {
-        let now = Mono::now().duration_since_epoch().to_micros();
-        let mcu_core_supply = self.adc0.read_cpu_voltage(CpuVoltageSource::Core).await;
-        // What 4095 means from ADC
-        let mcu_io_supply = self.adc0.read_cpu_voltage(CpuVoltageSource::Io).await;
+        // Poll ADC0 and ADC1 together (A bit faster)
+        let (adc0_res, adc1_res) = join!(
+            self.adc0_pins.poll_all(&mut self.adc0, &mut self.supc),
+            self.adc1_pins.poll_all(&mut self.adc1)
+        );
+        let var_res = self.adc1_variable_inputs.poll_all(&mut self.adc1).await;
 
-        let tft_adc = self.adc0.read(&mut self.pins.tft).await;
-        let tft_reading = match tft_adc {
-            r if r > 4090 => TftSensorReading::ParkingLock,
-            _ => {
-                let voltage = (tft_adc as u32 * mcu_core_supply as u32) / 4095;
-                let resistance = (voltage * 2000) / (mcu_core_supply as u32 - voltage);
-                let temperature = maths::interp(resistance as i32, TFT_LOOKUP);
-                TftSensorReading::Temperature(temperature as i16)
-            }
+        // Process the results
+        //println!("{:?}", var_res);
+        // PCB Temperature sensors
+        let temp_tle8242 = maths::interp(adc0_res.tsen_tle82423 as i32, &TSEN_LOOKUP);
+        let temp_pcb = maths::interp(adc0_res.tsen_pcb as i32, &TSEN_LOOKUP);
+
+        // Parking lock / ATF Temperature
+        let tft = if adc1_res.tft > 4090 {
+            TftState::Pll
+        } else {
+            let temp = maths::interp(adc1_res.tft as i32, &TFT_LOOKUP);
+            TftState::Temperature(temp as i8)
         };
 
-        // Voltage supplies (0-12V) (R1 = 10KOhm, R2 = 2.2KOhm)
-        let board_supply = Self::adc_reading_to_source(
-            self.adc1.read(&mut self.pins.vbatt_sense).await,
-            10_000,
-            2_200,
-        );
-        let solenoid_supply = Self::adc_reading_to_source(
-            self.adc1.read(&mut self.pins.vsol_sense).await,
-            10_000,
-            2_200,
-        );
-        // Voltage supplies (0-5V)
-        let sensor_supply = Self::adc_reading_to_source(
-            self.adc1.read(&mut self.pins.vsensor_sense).await,
-            10_000,
-            15_000,
-        );
+        // Power monitors
+        let vkl15 = adc_reading_to_source(adc1_res.pmon_kl15, 12_000, 3_300);
+        let vsense = adc_reading_to_source(adc1_res.pmon_sens, 10_000, 15_000);
+        let vkl87 = adc_reading_to_source(adc1_res.pmon_kl87, 12_000, 3_300);
+        let ikl87 = if adc1_res.pmon_kl87_diag < 10 || vkl87 < 5000 {
+            0
+        } else {
+            let reading_mv = (adc1_res.pmon_kl87_diag as f32 / 4095.0) * 3.3;
+            let scale = maths::interp(temp_pcb, BTS_DIV_TEMP) as f32;
+            (reading_mv * scale) as u16
+        };
 
-        // Current draw
-        let solenoid_current = self.adc0.read(&mut self.pins.sol_pwr_sense).await;
-        // CPU Temperature
-        let cpu_temp = self.adc0.read_cpu_temperature(&mut self.supc).await as i16;
-        let time = Mono::now().duration_since_epoch().to_micros() - now;
-        //info!(
-        //    "{}us, TFT: {}, CPU: {} C. [V_KL30: {} V V_KL87: {} V] MCU Core: {}mV - MCU IO: {}mV",
-        //    time,
-        //    tft_reading,
-        //    cpu_temp,
-        //    board_supply as f32 / 1000.0,
-        //    solenoid_supply as f32 / 1000.0,
-        //    mcu_core_supply,
-        //    mcu_io_supply
-        //);
         SensorData {
-            tft: tft_reading,
-            vbatt: board_supply,
-            n2_rpm: 0,
-            n3_rpm: 0,
+            tft,
+            vkl15,
+            vsense,
+            vkl87,
+            ikl87,
+            t_pcb: temp_pcb as i8,
+            t_tle: temp_tle8242 as i8,
         }
     }
 }
 
-#[derive(Default, Clone, Copy)]
-pub enum TftSensorReading {
-    #[default]
-    ParkingLock,
-    Temperature(i16),
+const MAX_ADC_VAL: u16 = 4095;
+
+const fn tft_resistance_to_adc_12bit(r1: u32, r_tsen: u32, temp: i16) -> (i32, i32) {
+    (
+        ((MAX_ADC_VAL as u32 * r_tsen) / (r1 + r_tsen)) as i32,
+        temp as i32,
+    )
 }
 
 // https://www.nxp.com/docs/en/data-sheet/KTY83_SER.pdf
 // KTY83/110
-// Resistance (Ohm), Temperature
+// ADC Value, Temperature
+const PULLUP_TFT_SENSOR: u32 = 2000; // Ohms
 const TFT_LOOKUP: &[(i32, i32)] = &[
-    (500, -55),
-    (525, -50),
-    (577, -40),
-    (632, -30),
-    (691, -20),
-    (754, -10),
-    (820, 0),
-    (889, 10),
-    (962, 20),
-    (1000, 25),
-    (1039, 30),
-    (1118, 40),
-    (1202, 50),
-    (1288, 60),
-    (1379, 70),
-    (1472, 80),
-    (1569, 90),
-    (1670, 100),
-    (1774, 110),
-    (1882, 120),
-    (1937, 125),
-    (1993, 130),
-    (2107, 140),
-    (2225, 150),
-    (2346, 160),
-    (2471, 170),
-    (2535, 175),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 500, -55),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 525, -50),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 525, -50),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 577, -40),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 632, -30),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 691, -20),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 754, -10),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 820, 0),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 889, 10),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 962, 20),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1000, 25),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1039, 30),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1118, 40),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1202, 50),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1288, 60),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1379, 70),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1472, 80),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1569, 90),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1670, 100),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1774, 110),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1882, 120),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1937, 125),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1993, 130),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2107, 140),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2225, 150),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2346, 160),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2471, 170),
+    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2535, 175),
 ];
+
+// https://www.nxp.com/docs/en/data-sheet/KTY83_SER.pdf
+// TDK NTCG 0402
+// ADC Value, Temperature
+const PULLUP_PCB_SENSOR: u32 = 12000; // Ohms
+const TSEN_LOOKUP: &[(i32, i32)] = &[
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 534, 125),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 599, 120),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 760, 110),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 975, 100),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 1267, 90),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 1668, 80),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 2227, 70),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 3019, 60),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 4158, 50),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 5826, 40),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 6942, 35),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 8312, 30),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 10000, 25),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 12090, 20),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 14700, 15),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 17960, 10),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 22070, 5),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 27280, 0),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 33930, -5),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 42450, -10),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 67790, -20),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 111300, -30),
+    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 188500, -40),
+];
+
+/// BTS6143D voltage divider based on temperature (See datasheet)
+const BTS_DIV_TEMP: &[(i32, i32)] = &[(-40, 10_000), (25, 9700), (150, 9300)];

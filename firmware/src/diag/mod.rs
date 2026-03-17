@@ -81,7 +81,7 @@ impl KwpServer {
         match self.pending_op {
             PendingOp::None => None,
             PendingOp::Reboot => {
-                Mono::delay(10u64.millis()).await;
+                Mono::delay(20u64.millis()).await;
                 SCB::sys_reset();
             }
         }

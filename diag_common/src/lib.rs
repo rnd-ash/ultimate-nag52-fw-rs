@@ -4,6 +4,9 @@
 //pub use automotive_diag::*;
 
 #[cfg(feature = "mcu")]
+pub use embedded_crc32c;
+
+#[cfg(feature = "mcu")]
 pub mod isotp_endpoints;
 
 #[cfg(feature = "mcu")]
@@ -23,6 +26,8 @@ pub enum BootloaderStayReason {
     Panic = 3,
     MagicPin = 4,
     AppInvalid = 5,
+    ProductionInfoNotSet = 6,
+    RamFailure = 7,
     Unkown,
 }
 
@@ -35,6 +40,7 @@ impl From<u8> for BootloaderStayReason {
             3 => Self::Panic,
             4 => Self::MagicPin,
             5 => Self::AppInvalid,
+            6 => Self::ProductionInfoNotSet,
             _ => Self::Unkown,
         }
     }

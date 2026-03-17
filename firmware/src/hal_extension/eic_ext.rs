@@ -1,14 +1,12 @@
 //! Wrapper around EIC Channel from atsamd_hal crate
 //! that can work with the Event system implementation
 
-use core::{ops::{Deref, DerefMut}, u16};
+use core::{ops::{Deref, DerefMut}};
 
 use atsamd_hal::{
     eic::{ChId as EvChId, EicPin},
-    gpio::{Pin, PinId, PinMode},
     pac::Peripherals,
 };
-use defmt::println;
 
 use crate::hal_extension::evsys::{
     ChId as EvsysChId, EvSysChannel, EvSysGenerator, GenReady, Uninitialized,

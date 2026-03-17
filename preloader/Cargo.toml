@@ -4,11 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-atsamd-hal = { workspace = true, features = ["same54p-rt"] }
+atsamd-hal = { workspace = true }
+bsp = { path = "../bsp" }
 bootloader = { path = "../bootloader", features = ["lib"] }
 cortex-m-rt.workspace = true
-cortex-m.workspace = true
-embedded-crc32c = "0.1.0"
+cortex-m = { workspace = true, features = ["inline-asm"] }
+diag_common = { path = "../diag_common", features = ["mcu"] }
+
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["now"] }
+rustc_version = "0.4.1"
+vergen = { version = "9.1.0" }
+vergen-git2 = { version = "9.1.0" }
 
 # For cargo flash
 [package.metadata]

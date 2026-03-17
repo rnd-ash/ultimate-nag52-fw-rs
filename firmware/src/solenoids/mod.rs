@@ -4,7 +4,7 @@ use atsamd_hal::{
     rtic_time::Monotonic,
     time::Hertz,
 };
-use bsp::SolPwrEn;
+use bsp::PowerEnSol;
 use defmt::println;
 
 use crate::{
@@ -22,14 +22,14 @@ pub mod solenoid_ctrl;
 pub mod tcc_sol;
 pub mod tle8242;
 
-const TLE_CHAN_Y3: TleChannel = TleChannel::_5;
-const TLE_CHAN_Y4: TleChannel = TleChannel::_4;
-const TLE_CHAN_Y5: TleChannel = TleChannel::_1;
+const TLE_CHAN_Y3: TleChannel = TleChannel::_6;
+const TLE_CHAN_Y4: TleChannel = TleChannel::_1;
+const TLE_CHAN_Y5: TleChannel = TleChannel::_4;
 
-const TLE_CHAN_MPC: TleChannel = TleChannel::_3;
+const TLE_CHAN_MPC: TleChannel = TleChannel::_5;
 const TLE_CHAN_SPC: TleChannel = TleChannel::_0;
 
-const TLE_CHAN_GPIO: TleChannel = TleChannel::_6;
+const TLE_CHAN_GPIO: TleChannel = TleChannel::_3;
 const TLE_CHAN_TRRS: TleChannel = TleChannel::_2;
 
 #[bitbybit::bitfield(u8)]
@@ -51,7 +51,7 @@ pub struct SolenoidOutputReq {
     pub on_off_valves: SolenoidOnOffReq,
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, PartialEq, PartialOrd)]
 pub enum ShiftValveState {
     #[default]
     Off,
@@ -93,7 +93,7 @@ impl MonitoredOutputs {
 
 pub struct SolenoidControler<T: dmac::ChId, R: dmac::ChId> {
     tle8242: Tle8242<T, R>,
-    pin_sol_pwr_en: SolPwrEn,
+    pin_sol_pwr_en: PowerEnSol,
     last_mpc: u16,
     last_spc: u16,
     all_channels: [TleChannel; 7],
@@ -131,7 +131,7 @@ macro_rules! make_binary_valve {
 }
 
 impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
-    pub fn new(tle8242: Tle8242<T, R>, pin_sol_pwr_en: SolPwrEn) -> Self {
+    pub fn new(tle8242: Tle8242<T, R>, pin_sol_pwr_en: PowerEnSol) -> Self {
         Self {
             tle8242,
             pin_sol_pwr_en,
@@ -230,6 +230,10 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         sol_tcc.write_tcc_sol(duty);
     }
 
+    pub fn get_observed_tcc_pwm(&self, sol_tcc: &mut TccSol) -> u16 {
+        sol_tcc.get_observed_pwm()
+    }
+
     /// Task is responsible for updating all solenoids on demand,
     /// and monitoring current consumption
     pub async fn update_task(&mut self) {
@@ -255,13 +259,30 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         self.update_current_readings().await;
     }
 
+    pub fn is_channel_on(&self, channel: TleChannel) -> bool {
+        match channel {
+            TLE_CHAN_MPC => self.last_mpc != 0,
+            TLE_CHAN_SPC => self.last_spc != 0,
+            TLE_CHAN_Y3 => self.y3_state != ShiftValveState::Off,
+            TLE_CHAN_Y4 => self.y4_state != ShiftValveState::Off,
+            TLE_CHAN_Y5 => self.y5_state != ShiftValveState::Off,
+            TLE_CHAN_TRRS => false, // TODO
+            TLE_CHAN_GPIO => false, // TODO
+            _ => false,
+        }
+    }
+
     pub async fn update_current_readings(&mut self) {
+        let avg_maybe = if !self.is_channel_on(self.all_channels[self.last_read_current_channel]) {
+            Some(0)
+        } else {
+            self.tle8242
+                .get_avg_current(self.all_channels[self.last_read_current_channel])
+                .await
+        };
+
         // Try to read the current channel
-        if let Some(avg) = self
-            .tle8242
-            .get_avg_current(self.all_channels[self.last_read_current_channel])
-            .await
-        {
+        if let Some(avg) = avg_maybe {
             // Valid response
             // Parse to mA
             let milliamps = match self.all_channels[self.last_read_current_channel] {

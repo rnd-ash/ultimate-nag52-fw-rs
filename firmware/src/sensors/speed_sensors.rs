@@ -1,25 +1,23 @@
-//! Speed sensor module
+//! # Speed sensor module
 //!
-//! # Mapping (TCU):
+//! The TCU has multiple inputs that require continuous pulse counting. These are mainly
+//! for speed sensors within or outside of the gearbox.
 //!
-//! * INTN2_RPM (Gearbox N2 SPD sensor - 60 pulses/rev) - PA16 - EIC Channel [0]
-//! * INTN3_RPM (Gearbox N3 SPD sensor - 60 pulses/rev) - PA14 - EIC Channel [14]
+//! Each speed sensor signal requires multiple peripherals to function together in order
+//! to count pulses without any CPU intervension. The mapping of signals to peripherals is
+//! as follows:
 //!
-//! * EXT1_RPM (Extra SPD Sensor TCU Pin 23) - PB08 - EIC Channel [8]
-//! * EXT2_RPM (Extra SPD Sensor TCU Pin 5)  - PA06 - EIC Channel [6]
-//! * EXT3_RPM (Extra SPD Sensor TCU Pin 6)  - REMOVED (Conflicting EIC channel)
+//! |*Signal*|*Description*|*Pulses/rev*|*GPIO Pin*|*EIC Channel*|*EVSYS Channel*|*TC peripheral*|
+//! |:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+//! |INTN2_RPM|Gearbox N2 speed sensor|60|PB18|2|0|TC0|
+//! |INTN3_RPM|Gearbox N3 speed sensor|60|PB19|3|1|TC1|
+//! |EXT1_RPM|Optional user speed sensor[^note]|Any[^note]|PB05|5|2|TC2|
+//! |EXT2_RPM|Optional user speed sensor|Any|PD00|0|3|TC3|
+//! |EXT2_RPM|Optional user speed sensor|Any|PD01|1|4|TC4|
 //!
-//! NOTE: EXT1_RPM is required for some Mercedes factory vehicles (G-Class). It is
-//!       used as an output shaft speed sensor, with a count of 48 pulses/rev.
+//! [^note]: On G-Class, this is used as an output shaft speed sensor with 48 pulses/rev
 //!
-//! # Mapping (Peripherals)
-//!
-//! * INTN2_RPM - EIC[0]  - EVSYS[0] - TC0
-//! * INTN3_RPM - EIC[14] - EVSYS[1] - TC1
-//! * EXT1_RPM  - EIC[8]  - EVSYS[2] - TC2
-//! * EXT2_RPM  - EIC[6]  - EVSYS[3] - TC3
-//!
-//! # Implementation
+//! ## Implementation
 //!
 //! Each Speed sensor has its own EIC channel, Event-System channel, and TC (Timer/Counter)
 //! peripheral. The EIC channel sends an event via the Event-System to the TC peripheral
@@ -37,72 +35,99 @@
 use atsamd_hal::{
     clock::v2::pclk::Pclk,
     eic::{self},
-    gpio::{Pin, PullDownInterrupt, PA06, PA14, PA16, PB08},
+    gpio::{PB05, PB18, PB19, PD00, PD01, Pin, PullDownInterrupt},
     pac::Mclk,
 };
 
 use crate::hal_extension::{
     eic_ext::{self, EicEvGen},
     evsys,
-    pcnt::{
+    pulse_count::{
         self, PulseCounter, Tc0PulseCounter, Tc1PulseCounter, Tc2PulseCounter, Tc3PulseCounter,
+        Tc4PulseCounter,
     },
 };
 
+/// Internal gearbox N2 speed sensor pulse counter
 pub type IntN2RpmPc =
-    PulseCounter<Tc0PulseCounter, evsys::Ch0, EicEvGen<Pin<PA16, PullDownInterrupt>, eic::Ch0>>;
+    PulseCounter<Tc0PulseCounter, evsys::Ch0, EicEvGen<Pin<PB18, PullDownInterrupt>, eic::Ch2>>;
+
+/// Internal gearbox N3 speed sensor pulse counter
 pub type IntN3RpmPc =
-    PulseCounter<Tc1PulseCounter, evsys::Ch1, EicEvGen<Pin<PA14, PullDownInterrupt>, eic::Ch14>>;
+    PulseCounter<Tc1PulseCounter, evsys::Ch1, EicEvGen<Pin<PB19, PullDownInterrupt>, eic::Ch3>>;
 
+/// GPIO 1 speed sensor pulse counter
 pub type Ext1RpmPc =
-    PulseCounter<Tc2PulseCounter, evsys::Ch2, EicEvGen<Pin<PB08, PullDownInterrupt>, eic::Ch8>>;
-pub type Ext2RpmPc =
-    PulseCounter<Tc3PulseCounter, evsys::Ch3, EicEvGen<Pin<PA06, PullDownInterrupt>, eic::Ch6>>;
+    PulseCounter<Tc2PulseCounter, evsys::Ch2, EicEvGen<Pin<PB05, PullDownInterrupt>, eic::Ch5>>;
 
-pub struct SpeedSensorSettings {
-    pulses_rev_n2: usize,
-    pulses_rev_n3: usize,
-    pulses_rev_ext1: usize,
-    pulses_rev_ext2: usize,
+/// GPIO 2 speed sensor pulse counter
+pub type Ext2RpmPc =
+    PulseCounter<Tc3PulseCounter, evsys::Ch3, EicEvGen<Pin<PD00, PullDownInterrupt>, eic::Ch0>>;
+
+/// GPIO 3 speed sensor pulse counter
+pub type Ext3RpmPc =
+    PulseCounter<Tc4PulseCounter, evsys::Ch4, EicEvGen<Pin<PD01, PullDownInterrupt>, eic::Ch1>>;
+
+pub struct AllPulseReadings {
+    pulses_n2: u16,
+    pulses_n3: u16,
+    pulses_ext1: Option<u16>,
+    pulses_ext2: Option<u16>,
+    pulses_ext3: Option<u16>,
 }
 
 pub struct AllSpeedSensors {
     n2: IntN2RpmPc,
     n3: IntN3RpmPc,
-    ext1: Ext1RpmPc,
-    ext2: Ext2RpmPc,
-    //settings: SpeedSensorSettings,
+    ext1: Option<Ext1RpmPc>,
+    ext2: Option<Ext2RpmPc>,
+    ext3: Option<Ext3RpmPc>,
 }
 
 impl AllSpeedSensors {
     pub fn new(
         n2: IntN2RpmPc,
         n3: IntN3RpmPc,
-        ext1: Ext1RpmPc,
-        ext2: Ext2RpmPc,
+        ext1: Option<Ext1RpmPc>,
+        ext2: Option<Ext2RpmPc>,
+        ext3: Option<Ext3RpmPc>,
         //settings: SpeedSensorSettings,
     ) -> Self {
         n2.clear();
         n3.clear();
-        ext1.clear();
-        ext2.clear();
-        Self { n2, n3, ext1, ext2 }
+        if let Some(ext1) = ext1.as_ref() {
+            ext1.clear();
+        }
+        if let Some(ext2) = ext2.as_ref() {
+            ext2.clear();
+        }
+        if let Some(ext3) = ext3.as_ref() {
+            ext3.clear();
+        }
+        Self {
+            n2,
+            n3,
+            ext1,
+            ext2,
+            ext3,
+        }
     }
 
-    pub fn update(&self) -> (u16, u16) {
-        macro_rules! count_and_clear {
-            ($sensor: ident) => {{
-                let res = self.$sensor.count();
-                self.$sensor.clear();
-                res
-            }};
-        }
+    pub fn update(&self) -> AllPulseReadings {
+        let n2_res = self.n2.count_and_clear();
+        let n3_res = self.n3.count_and_clear();
 
-        let n2_res = count_and_clear!(n2);
-        let n3_res = count_and_clear!(n3);
-        let ext1_res = count_and_clear!(ext1);
-        let ext2_res = count_and_clear!(ext2);
-        (n2_res, n3_res)
+        let ext1_res = self.ext1.as_ref().map(|x| x.count_and_clear());
+        let ext2_res = self.ext2.as_ref().map(|x| x.count_and_clear());
+        let ext3_res = self.ext3.as_ref().map(|x| x.count_and_clear());
+
+        AllPulseReadings {
+            pulses_n2: n2_res,
+            pulses_n3: n3_res,
+            pulses_ext1: ext1_res,
+            pulses_ext2: ext2_res,
+            pulses_ext3: ext3_res,
+        }
     }
 }
 
@@ -117,7 +142,7 @@ impl AllSpeedSensors {
 #[allow(clippy::too_many_arguments)]
 pub fn init_speed_sensor<
     PS: atsamd_hal::clock::v2::pclk::PclkSourceId,
-    TC: pcnt::CounterInstance,
+    TC: pulse_count::CounterInstance,
     P: eic::EicPin<ChId = EicId>,
     EicId: eic::ChId,
     EvsysId: evsys::ChId,
@@ -134,7 +159,7 @@ pub fn init_speed_sensor<
     eic_wrapper.sense(atsamd_hal::pac::eic::config::Sense0select::High);
 
     let evsys_channel_ready = eic_wrapper.enable_evsys(evsys_channel);
-    let pcnt = pcnt::PulseCounterBuilder::default()
+    let pcnt = pulse_count::PulseCounterBuilder::default()
         .stop_on_overflow(true)
         .run_in_standby(true)
         .build(tc, tc_clock, mclk, evsys_channel_ready);

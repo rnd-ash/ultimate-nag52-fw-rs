@@ -4,39 +4,35 @@ members = [
     "bsp",
     "bootloader",
     "diag_common",
+    "preloader", 
     "flasher",
-    "preloader",
-    "macros",
 ]
 
 [workspace.dependencies]
-atsamd-hal = { version = "0.22.2", features = [
-    "same54p-rt",
-    "can",
-    "async",
-    "dma",
-    "usb",
-    "defmt",
-] }
-#atsamd-hal = { path = "../atsamd/hal", features = [
+#atsamd-hal = { version = "0.23.2", features = [
 #    "same54p-rt",
 #    "can",
 #    "async",
 #    "dma",
 #    "usb",
 #    "defmt",
+#    "usb-buffer-4k",
 #] }
-cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+atsamd-hal = { git="https://github.com/rnd-ash/atsamd/", branch="dsu-improvements", features = [
+    "same54p-rt",
+    "can",
+    "async",
+    "dma",
+    "usb",
+    "defmt",
+    "usb-buffer-4k",
+] }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.5", features = ["device"] }
 mcan = "0.7.0"
+defmt = "1.0.1"
+defmt-rtt = "1.1.0"
 
 # Patch USB-Device crate to support custom Descriptor buffer size, and Support setting USB Spec V1.0/1.1
 [patch.crates-io]
 usb-device = { git = "https://github.com/rust-embedded-community/usb-device", rev = "a6e6c9115c54fa18c11f41c6a8fcb98dd700912b" }
-
-
-#[profile.release]
-#debug = 2
-#lto = "fat"
-#opt-level = 3
-#codegen-units = 1

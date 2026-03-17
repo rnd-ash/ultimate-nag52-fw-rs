@@ -6,16 +6,16 @@ edition = "2021"
 [dependencies]
 env_logger="*"
 diag_common = {path="../diag_common"}
-log="0.4.27"
-clap = { version = "4.5.45", features = ["derive"] }
+log="0.4.29"
+clap = { version = "4.5.60", features = ["derive"] }
 color-eyre = "0.6.5"
 console = "0.16.0"
-ecu_diagnostics = "0.99.0"
+ecu_diagnostics = "0.103.0"
 #ecu_diagnostics = {path="../../ecu_diagnostics"}
-embedded-crc32c = "0.1.0"
 indicatif = "0.18.0"
-serialport = "4.7.3"
+serialport = "4.8.1"
 clap-num = "1.2.0"
-chrono = "0.4.41"
+chrono = "0.4.44"
 elf = "0.8.0"
-object = "0.37.3"
+object = "0.38.1"
+crc32fast = "1.5.0"
