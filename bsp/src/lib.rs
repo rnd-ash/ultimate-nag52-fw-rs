@@ -3,7 +3,6 @@
 use atsamd_hal::{
     clock::v2::{gclk::GclkId, pclk::Pclk, types::Usb},
     pac::{self, Mclk},
-    qspi::{self, Qspi},
     sercom::{
         i2c::{self},
         spi, Sercom2, Sercom6,
@@ -443,29 +442,6 @@ atsamd_hal::bsp_pins!(
         }
     }
 );
-
-pub fn ext_flash(
-    mclk: &mut Mclk,
-    qspi: pac::Qspi,
-    sck: impl Into<ExtFlashSck>,
-    cs: impl Into<ExtFlashCs>,
-    io0: impl Into<ExtFlashD0>,
-    io1: impl Into<ExtFlashD1>,
-    io2: impl Into<ExtFlashD2>,
-    io3: impl Into<ExtFlashD3>,
-) -> Qspi<qspi::OneShot> {
-    let qspi = qspi::Qspi::new(
-        mclk,
-        qspi,
-        sck.into(),
-        cs.into(),
-        io0.into(),
-        io1.into(),
-        io2.into(),
-        io3.into(),
-    );
-    qspi
-}
 
 pub type EepromPads = i2c::Pads<Sercom2, EepromSDA, EepromSCL>;
 pub type EepromI2c = i2c::I2c<i2c::Config<EepromPads>>;

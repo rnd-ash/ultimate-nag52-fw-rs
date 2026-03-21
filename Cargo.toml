@@ -5,8 +5,11 @@ members = [
     "bootloader",
     "diag_common",
     "preloader", 
-    "flasher",
 ]
+
+exclude = ["candb_codegen", "flasher"]
+
+resolver = "3"
 
 [workspace.dependencies]
 #atsamd-hal = { version = "0.23.2", features = [
@@ -18,8 +21,18 @@ members = [
 #    "defmt",
 #    "usb-buffer-4k",
 #] }
-atsamd-hal = { git="https://github.com/rnd-ash/atsamd/", branch="dsu-improvements", features = [
-    "same54p-rt",
+#atsamd-hal = { git="https://github.com/rnd-ash/atsamd/", branch="dsu-improvements", features = [
+#    "same54p-rt",
+#    "can",
+#    "async",
+#    "dma",
+#    "usb",
+#    "defmt",
+#    "usb-buffer-4k",
+#] }
+
+atsamd-hal = { git="https://github.com/rnd-ash/atsamd/", branch="feat/pic32cxsg", features = [
+    "pic32cxsg41128-rt",
     "can",
     "async",
     "dma",
@@ -27,6 +40,7 @@ atsamd-hal = { git="https://github.com/rnd-ash/atsamd/", branch="dsu-improvement
     "defmt",
     "usb-buffer-4k",
 ] }
+
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.5", features = ["device"] }
 mcan = "0.7.0"

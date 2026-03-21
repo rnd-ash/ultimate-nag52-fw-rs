@@ -18,6 +18,7 @@ pub struct LocationDisplayInfo<'a> {
 
 /// Panic message type
 #[derive(Copy, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AppPanicMsgTy {
     /// Dynamic panic message (Created using fmt! macro)
     Dynamic(DynAppPanicMsg),
@@ -48,11 +49,17 @@ pub struct DynAppPanicMsg {
     buf: [u8; PANIC_MSG_BUF_SIZE],
 }
 
+impl Default for DynAppPanicMsg {
+    fn default() -> Self {
+        Self { buf: [0; PANIC_MSG_BUF_SIZE] }
+    }
+}
+
 impl core::fmt::Write for DynAppPanicMsg {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let pos = self.buf.iter().position(|x| *x == 0).unwrap_or(PANIC_MSG_BUF_SIZE-1);
         //defmt::info!("{}  - {}", pos, s);
-        let maximum = core::cmp::min(PANIC_MSG_BUF_SIZE-1 - pos, s.as_bytes().len());
+        let maximum = core::cmp::min(PANIC_MSG_BUF_SIZE-1 - pos, s.len());
         self.buf[pos..pos + maximum].copy_from_slice(&s.as_bytes()[..maximum]);
         self.buf[pos + maximum] = 0;
         Ok(())
@@ -60,9 +67,7 @@ impl core::fmt::Write for DynAppPanicMsg {
 }
 
 impl DynAppPanicMsg {
-    pub fn new() -> Self {
-        Self { buf: [0; PANIC_MSG_BUF_SIZE] }
-    }
+
 
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {
@@ -79,15 +84,15 @@ pub struct AppPanicInfo {
 }
 
 impl AppPanicInfo {
-    pub fn new<'a>(panic: &'a PanicInfo) -> Self {
+    pub fn new(panic: &PanicInfo) -> Self {
         let msg = match panic.message().as_str() {
             Some(flash_string) => AppPanicMsgTy::Static {
                 addr: flash_string.as_ptr(),
-                len: flash_string.as_bytes().len(),
+                len: flash_string.len(),
             },
             None => {
                 use core::fmt::Write;
-                let mut buffer = DynAppPanicMsg::new();
+                let mut buffer = DynAppPanicMsg::default();
                 // Dynamic string
                 let _ = write!(&mut buffer, "{}", panic.message());
                 AppPanicMsgTy::Dynamic(buffer)
@@ -96,7 +101,7 @@ impl AppPanicInfo {
 
         let location = panic.location().map(|loc| LocationInfo {
             file_str_ptr: loc.file().as_ptr(),
-            file_str_len: loc.file().as_bytes().len() as u32,
+            file_str_len: loc.file().len() as u32,
             col: loc.column(),
             line: loc.line(),
         });

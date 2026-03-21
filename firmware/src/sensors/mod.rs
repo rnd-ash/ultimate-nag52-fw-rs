@@ -14,7 +14,6 @@ use atsamd_hal::{
     pac::{self, Supc},
 };
 
-use defmt::{println};
 use futures::join;
 
 use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
@@ -116,7 +115,7 @@ impl AdcData {
             self.adc0_pins.poll_all(&mut self.adc0, &mut self.supc),
             self.adc1_pins.poll_all(&mut self.adc1)
         );
-        let var_res = self.adc1_variable_inputs.poll_all(&mut self.adc1).await;
+        let _var_res = self.adc1_variable_inputs.poll_all(&mut self.adc1).await;
 
         // Process the results
         //println!("{:?}", var_res);

@@ -6,28 +6,20 @@ use atsamd_hal::{
     fugit::ExtU64,
     nvm::{
         self, Nvm,
-        smart_eeprom::{SmartEeprom, SmartEepromState, Unlocked},
+        smart_eeprom::{SmartEeprom, Unlocked},
     },
-    pac::{Peripherals, dsu::did::Seriesselect},
     rtic_time::Monotonic,
     serial_number,
     trng::Trng,
-    usb::UsbBus,
 };
 pub use automotive_diag::kwp2000::*;
-use bootloader::bl_info::{CodeSectionInfo, MemoryRegion};
 use cortex_m::peripheral::SCB;
-use defmt::println;
 use diag_common::{
-    BootloaderStayReason,
-    isotp_endpoints::usb_isotp::UsbIsoTpConsumer,
-    ram_info::{BootloaderRamInfo, MAX_RESET_COUNT},
+    BootloaderStayReason, MemoryRegion, ram_info::BootloaderRamInfo, smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info}
 };
-use usbd_serial::DefaultBufferStore;
 
 use crate::{
-    BS_EGS, ISOTP_BUF_SIZE, Mono, ST_MIN_EGS,
-    bl_info::{self, region_crc},
+    BS_EGS, Mono, ST_MIN_EGS,
 };
 
 #[derive(Copy, Clone)]
@@ -105,7 +97,7 @@ pub fn smart_eeprom(nvm: &mut Nvm) -> SmartEeprom<'_, Unlocked> {
 
 impl KwpServer {
     pub fn new(
-        mut nvm: Nvm,
+        nvm: Nvm,
         rnd: Trng,
         dsu: Dsu,
         bootloader_ram_info: BootloaderRamInfo,
@@ -391,7 +383,7 @@ impl KwpServer {
             if cmd[1] == 0x8A {
                 // Return all the block information on the ECU
                 let eeprom = smart_eeprom(&mut self.nvm);
-                let info = bl_info::get_smarteeprom_info(&eeprom);
+                let info = get_smarteeprom_info(&eeprom);
 
                 // 9 = SID ID + CRC BL(4) + CRC APP(4)
                 let mut response = [0; 9 + core::mem::size_of::<CodeSectionInfo>() * 3];
@@ -417,12 +409,12 @@ impl KwpServer {
                 Ok(self.make_positive_reply(cmd[0], &response))
             } else if cmd[1] == 0x86 {
                 let eeprom = smart_eeprom(&mut self.nvm);
-                let info = bl_info::get_smarteeprom_info(&eeprom);
+                let info = get_smarteeprom_info(&eeprom);
 
                 if info.is_production_date_set() {
                     let mut response = [0; 17];
                     response[0] = 0x86;
-                    response[6] = bcd_encode(01);
+                    response[6] = bcd_encode(1);
                     response[7] = bcd_encode(26);
                     response[8] = bcd_encode(info.bootloader_info.compile_week);
                     response[9] = bcd_encode(info.bootloader_info.compile_year);
@@ -442,7 +434,7 @@ impl KwpServer {
                 }
             } else if cmd[1] == 0x87 {
                 let eeprom = smart_eeprom(&mut self.nvm);
-                let info = bl_info::get_smarteeprom_info(&eeprom);
+                let info = get_smarteeprom_info(&eeprom);
                 let mut response = [0; 21];
                 response[0] = 0x87;
                 response[1] = 0x08; // ECU Origin (Siemens)
@@ -487,14 +479,14 @@ impl KwpServer {
                 return Err(KwpError::SecurityAccessDenied);
             }
             let mut eeprom = smart_eeprom(&mut self.nvm);
-            let curr_info = bl_info::get_smarteeprom_info(&eeprom);
+            let curr_info = get_smarteeprom_info(&eeprom);
             // Day, Week, Month, year
             if cmd[2] > 31 || cmd[3] > 52 || cmd[4] > 12 || cmd[5] < 24 {
                 Err(KwpError::SubFunctionNotSupportedInvalidFormat)
             } else if curr_info.is_production_date_set() {
                 Err(KwpError::ConditionsNotCorrectRequestSequenceError)
             } else {
-                bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                mutate_smarteeprom_info(&mut eeprom, |info| {
                     info.board_prod_day = cmd[2];
                     info.board_prod_week = cmd[3];
                     info.board_prod_month = cmd[4];
@@ -518,7 +510,7 @@ impl KwpServer {
             } else if start_addr >= MemoryRegion::Application.range_exclusive().start {
                 // Mark app as erased now
                 let mut eeprom = smart_eeprom(&mut self.nvm);
-                bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                mutate_smarteeprom_info(&mut eeprom, |info| {
                     info.app_flashing_not_done = 0xFF;
                     info.crc32_app = 0xFFFF_FFFF
                 });
@@ -556,22 +548,22 @@ impl KwpServer {
                 let mut eeprom = smart_eeprom(&mut self.nvm);
                 // CRC32 OK, now make a CRC of the entire app flash region, and write it to the app
                 if is_bootloader {
-                    bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                    mutate_smarteeprom_info(&mut eeprom, |info| {
                         info.bl_flashing_pending = 0;
                         info.bootloader_info.clear();
-                        info.crc32_bl = region_crc(
-                            bl_info::MemoryRegion::BootloaderScratch.range_exclusive(),
-                            &mut self.dsu,
-                        )
+                        info.crc32_bl = self.dsu.crc32(
+                            MemoryRegion::BootloaderScratch.start_addr(),
+                            MemoryRegion::BootloaderScratch.size_bytes()
+                        ).unwrap_or(0xFFFF_FFFF)
                     });
                 } else {
-                    bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
+                    mutate_smarteeprom_info(&mut eeprom, |info| {
                         info.app_flashing_not_done = 0;
                         info.firmware_info.clear();
-                        info.crc32_app = region_crc(
-                            bl_info::MemoryRegion::Application.range_exclusive(),
-                            &mut self.dsu,
-                        )
+                        info.crc32_app = self.dsu.crc32(
+                            MemoryRegion::Application.start_addr(),
+                            MemoryRegion::Application.size_bytes()
+                        ).unwrap_or(0xFFFF_FFFF)
                     });
                 }
                 Ok(self.make_positive_reply(cmd[0], &[0xE1, 0x01]))
@@ -661,7 +653,7 @@ impl KwpServer {
             if cmd.len() > 2 {
                 let req_blk_id = cmd[1];
                 let data_size = cmd.len() - 2;
-                if req_blk_id == *blk_id && data_size % 4 == 0 {
+                if req_blk_id == *blk_id && data_size.is_multiple_of(4) {
                     let addr = *current_addr as *mut u32;
                     // Copy to 4 byte aligned array
                     self.flash_buf[..cmd.len() - 2].copy_from_slice(&cmd[2..]);

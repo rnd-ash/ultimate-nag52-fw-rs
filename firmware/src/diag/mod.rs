@@ -40,7 +40,7 @@ impl KwpServer {
         1 + data.len()
     }
 
-    pub fn process_cmd<'a>(&'a mut self, cmd: &[u8], now_ms: u64) -> &'a [u8] {
+    pub fn process_cmd<'a>(&'a mut self, cmd: &[u8], _now_ms: u64) -> &'a [u8] {
         self.last_cmd_time = Mono::now().duration_since_epoch().to_millis();
         let r = match KwpCommand::try_from(cmd[0]).ok() {
             Some(KwpCommand::StartDiagnosticSession) => self.start_diag_session(cmd),
@@ -77,7 +77,7 @@ impl KwpServer {
         }
     }
 
-    pub async fn update(&mut self, now_ms: u64) -> Option<&[u8]> {
+    pub async fn update(&mut self, _now_ms: u64) -> Option<&[u8]> {
         match self.pending_op {
             PendingOp::None => None,
             PendingOp::Reboot => {

@@ -34,7 +34,7 @@
 
 use atsamd_hal::{
     clock::v2::pclk::Pclk,
-    eic::{self},
+    eic::{self, Sense},
     gpio::{PB05, PB18, PB19, PD00, PD01, Pin, PullDownInterrupt},
     pac::Mclk,
 };
@@ -156,7 +156,7 @@ pub fn init_speed_sensor<
 ) -> PulseCounter<TC, EvsysId, EicEvGen<P, EicId>> {
     let mut eic_wrapper = eic_ext::EicEvGen::new(pin.into(), eic_channel);
     eic_wrapper.enable_interrupt();
-    eic_wrapper.sense(atsamd_hal::pac::eic::config::Sense0select::High);
+    eic_wrapper.sense(Sense::High);
 
     let evsys_channel_ready = eic_wrapper.enable_evsys(evsys_channel);
     let pcnt = pulse_count::PulseCounterBuilder::default()

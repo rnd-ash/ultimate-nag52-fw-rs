@@ -118,3 +118,4 @@ impl<'a, B: usb_device::bus::UsbBus, RS: BorrowMut<[u8]>, WS: BorrowMut<[u8]>, c
         Ok(())
     }
 }
+

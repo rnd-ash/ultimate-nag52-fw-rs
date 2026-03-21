@@ -4,7 +4,7 @@
 // 2. Message for channels 0-3, and Message for channels 4-7
 // 3. Message per channel
 
-use arbitrary_int::{u11, u12, u14, u18, u19, u2, u20, u4, u5, u6};
+use arbitrary_int::{u11, u12, u14, u19, u2, u20, u4, u5, u6};
 
 const CMD_MATCH_MASK: u32 = 0b0111_1111_0000_0000_0000_0000_0000_0000;
 const WRITE_MATCH_MASK: u32 = 0b1000_0000_0000_0000_0000_0000_0000_0000;

@@ -3,21 +3,11 @@ name = "bootloader"
 version = "0.2.0"
 edition = "2024"
 
-[lib]
-name = "bootloader"
-path = "src/lib.rs"
-
 [dependencies]
 cortex-m-rt.workspace = true
 bsp = { path = "../bsp" }
 diag_common = { path = "../diag_common", features = ["mcu"] }
-atsamd-hal = { workspace = true, features = [
-    "same54p-rt",
-    "can",
-    "usb",
-    "async",
-    "rtic",
-] }
+atsamd-hal = { workspace = true, features=["async", "rtic", "can"] }
 cortex-m = { workspace = true, features = ["inline-asm"] }
 mcan.workspace = true
 konst = { version = "0.4.1", features = ["iter"] }
@@ -41,7 +31,6 @@ vergen = { version = "9.1.0" }
 vergen-git2 = { version = "9.1.0" }
 
 [features]
-lib = []
 skip-app-check = []
 stay-in-bootloader = []
 

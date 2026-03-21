@@ -1,5 +1,5 @@
 use atsamd_hal::{can::Dependencies, pac};
-use mcan::{message::{rx, tx}, messageram::SharedMemory, rx_fifo::{Fifo0, RxFifo}};
+use mcan::{message::{rx, tx}, rx_dedicated_buffers::RxDedicatedBuffer, rx_fifo::{Fifo0, RxFifo}};
 
 use crate::{CanRx, CanTx};
 use mcan::generic_array::typenum::{*};
@@ -8,13 +8,13 @@ pub struct Capacities;
 
 // rx::Message<8> since EGS does not deal with CANFD (So max 8 byte message)
 impl mcan::messageram::Capacities for Capacities {
-    type StandardFilters = U1; // TODO (Add filters as needed - Can be up to U128)
+    type StandardFilters = U32; // TODO (Add filters as needed - Can be up to U128)
     type ExtendedFilters = U0; // No extended CAN support (Vehicles don't use it)
     type RxBufferMessage = rx::Message<8>;
-    type DedicatedRxBuffers = U0;
-    // Use RxFIFO0 with 64 slots (each for an 8 byte msg)
+    type DedicatedRxBuffers = U32;
+    // Use RxFIFO0 with 16 slots (each for an 8 byte msg)
     type RxFifo0Message = rx::Message<8>;
-    type RxFifo0 = U64;
+    type RxFifo0 = U16;
     // We don't use FIFO1 (Set size to 0)
     type RxFifo1Message = rx::Message<8>;
     type RxFifo1 = U0;
@@ -24,7 +24,7 @@ impl mcan::messageram::Capacities for Capacities {
     type TxBuffers = U10;  // Up to 10 messages to Tx...
     // ...of which 7 frames have their own dedicated 'slots'
     type DedicatedTxBuffers = U7;
-    type TxEventFifo = U32;
+    type TxEventFifo = U8;
 }
 
 pub const CAN_MEM_ADDR: usize = 0x2000_0000;
@@ -35,6 +35,9 @@ pub const CAN_RX_MAILBOX_DIAG: usize = 0;
 
 pub type RxFifo0 =
     RxFifo<'static, Fifo0, Can0, <Capacities as mcan::messageram::Capacities>::RxFifo0Message>;
+
+pub type RxDedicated = 
+    RxDedicatedBuffer<'static, Can0, <Capacities as mcan::messageram::Capacities>::RxFifo0Message>;
 
 pub type Can0Tx = mcan::tx_buffers::Tx<'static, Can0, Capacities>;
 

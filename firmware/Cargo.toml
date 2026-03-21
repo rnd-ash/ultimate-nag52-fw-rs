@@ -7,16 +7,7 @@ edition = "2024"
 
 
 [dependencies]
-atsamd-hal = { workspace = true, features = [
-    "same54p-rt",
-    "can",
-    "usb",
-    "async",
-    "rtic",
-    "dma",
-    "usb-buffer-4k",
-] }
-bootloader = { path = "../bootloader", features = ["lib"] }
+atsamd-hal = { workspace = true, features=["async", "dma", "rtic", "can"] }
 bsp = { path = "../bsp" }
 diag_common = { path = "../diag_common", features = ["mcu"] }
 cortex-m = { workspace = true, features = [
@@ -42,7 +33,7 @@ rtic = { version = "2.2.0", features = ["thumbv7-backend"] }
 heapless = "0.9.1"
 
 futures = { version = "0.3.31", default-features = false }
-bitbybit = "1.4.0"
+bitbybit = "2.0.0"
 arbitrary-int = "2.0.0"
 libm = "0.2.15"
 bitflags = "2.9.4"

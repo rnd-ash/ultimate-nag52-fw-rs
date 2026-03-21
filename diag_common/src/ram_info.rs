@@ -1,5 +1,3 @@
-use core::ops::Not;
-
 use crate::dyn_panic::AppPanicInfo;
 
 pub const MAX_RESET_COUNT: u8 = 5;

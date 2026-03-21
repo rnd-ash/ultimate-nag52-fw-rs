@@ -1,7 +1,6 @@
 #![cfg_attr(feature = "mcu", no_std)]
 
-//pub mod ioctl;
-//pub use automotive_diag::*;
+use core::ops::Range;
 
 #[cfg(feature = "mcu")]
 pub use embedded_crc32c;
@@ -10,13 +9,31 @@ pub use embedded_crc32c;
 pub mod isotp_endpoints;
 
 #[cfg(feature = "mcu")]
-pub mod userpage;
+pub mod hal_extensions;
+
+pub mod smarteeprom;
 
 #[cfg(feature = "mcu")]
 pub mod dyn_panic;
 
 #[cfg(feature = "mcu")]
 pub mod ram_info;
+
+pub const fn parse_u8(s: &str) -> u8 {
+    let mut p = konst::Parser::new(s);
+    konst::result::unwrap!(p.parse_u8())
+}
+
+const GIT_SHA_LEN: usize = 12;
+pub const fn parse_git_sha(s: &str) -> [u8; GIT_SHA_LEN] {
+    let mut out = [0; GIT_SHA_LEN];
+
+    let mut chars = konst::string::chars(s);
+    konst::for_range! { i in 0..GIT_SHA_LEN =>
+        out[i] = chars.next().unwrap() as u8
+    }
+    out
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BootloaderStayReason {
@@ -47,3 +64,46 @@ impl From<u8> for BootloaderStayReason {
 }
 
 pub struct KwpPanicInfo {}
+
+const KB: u32 = 1024;
+const SECTOR_SIZE: u32 = 8*KB;
+const PRELOADER_ADDR_RANGE: Range<u32> = 0..(8 * KB);
+const BOOTLOADER_ADDR_RANGE: Range<u32> = (8 * KB)..(120 * KB);
+const BOOTLOADER_SCRATCH_ADDR_RANGE: Range<u32> = (120 * KB)..(240 * KB);
+const APP_ADDR_RANGE: Range<u32> = (120 * KB)..(1024 * KB);
+
+pub enum MemoryRegion {
+    Preloader,
+    Bootloader,
+    BootloaderScratch,
+    Application,
+}
+
+impl MemoryRegion {
+    pub const fn range_exclusive(&self) -> Range<u32> {
+        match self {
+            MemoryRegion::Preloader => PRELOADER_ADDR_RANGE,
+            MemoryRegion::Bootloader => BOOTLOADER_ADDR_RANGE,
+            MemoryRegion::BootloaderScratch => BOOTLOADER_SCRATCH_ADDR_RANGE,
+            MemoryRegion::Application => APP_ADDR_RANGE,
+        }
+    }
+
+    pub const fn blocks_8k(&self) -> u32 {
+        let range = self.range_exclusive();
+        (range.end - range.start) / SECTOR_SIZE
+    }
+
+    pub const fn start_addr(&self) -> u32 {
+        self.range_exclusive().start
+    }
+
+    pub const fn size_bytes(&self) -> u32 {
+        self.blocks_8k()*SECTOR_SIZE
+    }
+}
+
+// Ensure everything is aligned to per-page
+static_assertions::const_assert!(PRELOADER_ADDR_RANGE.start.is_multiple_of(SECTOR_SIZE));
+static_assertions::const_assert!(BOOTLOADER_ADDR_RANGE.start.is_multiple_of(SECTOR_SIZE));
+static_assertions::const_assert!(APP_ADDR_RANGE.start.is_multiple_of(SECTOR_SIZE));

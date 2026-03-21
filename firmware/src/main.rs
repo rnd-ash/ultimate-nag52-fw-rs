@@ -5,28 +5,15 @@ use atsamd_hal::adc;
 use atsamd_hal::adc::Adc0;
 use atsamd_hal::adc::Adc1;
 use atsamd_hal::bind_multiple_interrupts;
-use atsamd_hal::prelude::_embedded_hal_watchdog_Watchdog;
-use atsamd_hal::prelude::ExtU64;
 use atsamd_hal::rtc::rtic::rtc_clock;
-use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::sercom::Sercom2;
 use atsamd_hal::sercom::Sercom6;
-use atsamd_hal::{
-    clock::v2::{
-        clock_system_at_reset,
-        dfll::FromUsb,
-        dpll::Dpll,
-        gclk::{Gclk, GclkDiv8, GclkDiv16},
-        osculp32k::OscUlp32k,
-        pclk::Pclk,
-        rtcosc::RtcOsc,
-    },
-    pac::SCB,
-};
-use cortex_m_rt::ExceptionFrame;
+use atsamd_hal::pac::SCB;
+use diag_common::parse_git_sha;
+use diag_common::parse_u8;
+use diag_common::smarteeprom::CodeSectionInfo;
 use core::panic::PanicInfo;
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering;
 use cortex_m_rt::exception;
 use defmt_rtt as _;
 use diag_common::{dyn_panic::AppPanicInfo, ram_info::modify_bootloader_info};
@@ -44,6 +31,8 @@ pub mod solenoids;
 pub mod storage;
 pub mod usb;
 pub mod ram_test;
+pub mod tasks;
+
 // -- Interrupt handlers for async APIs --  //
 bind_multiple_interrupts!(struct Sercom6Irqs {
     SERCOM6: [SERCOM6_0, SERCOM6_1, SERCOM6_2, SERCOM6_3, SERCOM6_OTHER] => atsamd_hal::sercom::spi::InterruptHandler<Sercom6>;
@@ -77,8 +66,6 @@ fn panic(info: &PanicInfo) -> ! {
     SCB::sys_reset();
 }
 
-use bootloader::bl_info::{CodeSectionInfo, parse_git_sha, parse_u8};
-
 pub const fn create_code_info(name: [u8; 10]) -> CodeSectionInfo {
     CodeSectionInfo {
         name,
@@ -108,78 +95,60 @@ const ISOTP_BUF_SIZE: usize = 4096;
 pub const CAN_ID_DIAG_TX: StandardId = unsafe { StandardId::new_unchecked(0x7E9) };
 pub const CAN_ID_DIAG_RX: StandardId = unsafe { StandardId::new_unchecked(0x7E1) };
 
-#[rtic::app(device = atsamd_hal::pac, dispatchers = [DAC_EMPTY_0, DAC_EMPTY_1, DAC_RESRDY_0, DAC_RESRDY_1])]
+#[rtic::app(device = atsamd_hal::pac, dispatchers = [DAC_EMPTY_0, DAC_EMPTY_1, EVSYS_0, EVSYS_1])]
 mod app {
-    use core::{ptr::{self, addr_of}, sync::atomic::Ordering};
+    
 
     use crate::{
         can::{
             CanLayer, CanLayerTy,
-            data::{SignalFrame, slave_mode::SolenoidControl},
-            egs52::Egs52Can,
-            input_output::{CanRxSignals, CanTxSignals},
-            slave::{self, FullReport, SensorReport, SlaveCan, SolenoidReport},
+            slave::SlaveCan,
         },
         diag::KwpServer,
-        hal_extension::evsys,
         sensors::{
-            AdcData, SensorData, TftState,
-            adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs},
-            speed_sensors::{
-                self, AllSpeedSensors, Ext1RpmPc, Ext2RpmPc, IntN2RpmPc, IntN3RpmPc,
-                init_speed_sensor,
-            },
-            variable_adc_input::VariableAdcInput,
+            AdcData, SensorData,
+            speed_sensors::AllSpeedSensors,
         },
         solenoids::{
             SolenoidControler,
             tcc_sol::TccSol,
-            tle8242::{TLE_SPI_BAUD, Tle8242, Tle8242Pins},
         },
         storage::eeprom::Eeprom,
         usb::UsbData,
     };
     use atsamd_hal::{
-        can::Dependencies, clock::v2::{pclk, types::Can0}, dmac::{self, DmaController, PriorityLevel}, dsu::MemoryTestResult, ehal::digital::OutputPin, eic::Eic, fugit::{HertzU32, RateExtU32}, nvm::{Nvm, smart_eeprom::SmartEepromMode}, pac::{DCB, DWT, NVIC, Peripherals}, serial_number, usb::{
+        clock::v2::{pclk, types::Can0}, dmac::{self}, usb::{
             UsbBus,
-            usb_device::{
-                bus::UsbBusAllocator,
-                device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid},
-            },
+            usb_device::bus::UsbBusAllocator,
         }, watchdog::Watchdog
     };
-    use bootloader::bl_info::{CodeSectionInfo, mutate_smarteeprom_info};
-    use bsp::can_deps::{self, Capacities, RxFifo0};
-    use cortex_m::{asm::wfi, interrupt::CriticalSection};
-    use defmt::{info, println};
-    use diag_common::{isotp_endpoints::{
+    use bsp::can_deps::{Capacities, RxDedicated, RxFifo0};
+    use diag_common::isotp_endpoints::{
         SharedIsoTpBuf,
-        can_isotp::{IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg, make_isotp_endpoint},
-        usb_isotp::{UsbIsoTpConsumer, new_usb_isotp},
-    }, ram_info};
-    use futures::FutureExt;
-    use heapless::format;
+        can_isotp::{IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg},
+        usb_isotp::UsbIsoTpConsumer,
+    };
+    
+    
     use mcan::{
-        embedded_can::{Id, StandardId},
-        filter::Filter,
         interrupt::{Interrupt, OwnedInterruptSet, state::EnabledLine0},
         message::Raw,
-        messageram::SharedMemory,
+        messageram::SharedMemory, rx_dedicated_buffers::DynRxDedicatedBuffer,
     };
-    use rtic::mutex;
+    
     use rtic_sync::{arbiter::Arbiter, signal::Signal};
-    use usbd_serial::{DefaultBufferStore, SerialPort, USB_CLASS_CDC};
+    use usbd_serial::{DefaultBufferStore, SerialPort};
 
     use super::*;
 
     #[local]
-    struct Resources {
-        adc_data: AdcData,
-        speed_sensors: AllSpeedSensors,
+    pub struct Resources {
+        pub adc_data: AdcData,
+        pub speed_sensors: AllSpeedSensors,
 
-        isotp_isr: IsoTpInterruptHandler<'static, Can0, Capacities, ISOTP_BUF_SIZE>,
-        isotp_thread: IsotpConsumer<'static, Can0, Capacities, ISOTP_BUF_SIZE>,
-        usb_isotp_thread: UsbIsoTpConsumer<
+        pub isotp_isr: IsoTpInterruptHandler<'static, Can0, Capacities, ISOTP_BUF_SIZE>,
+        pub isotp_thread: IsotpConsumer<'static, Can0, Capacities, ISOTP_BUF_SIZE>,
+        pub usb_isotp_thread: UsbIsoTpConsumer<
             'static,
             UsbBus,
             DefaultBufferStore,
@@ -187,26 +156,26 @@ mod app {
             ISOTP_BUF_SIZE,
         >,
 
-        can0_interrupts: OwnedInterruptSet<pclk::ids::Can0, EnabledLine0>,
-        can0_fifo0: RxFifo0,
-
-        diag_server: KwpServer,
+        pub can0_interrupts: OwnedInterruptSet<pclk::ids::Can0, EnabledLine0>,
+        pub can0_fifo0: RxFifo0,
+        pub can0_dedicated: RxDedicated,
+        pub diag_server: KwpServer,
     }
 
     #[shared]
-    struct Shared {
+    pub struct Shared {
         #[lock_free]
-        usb_data: UsbData<'static>,
-        wdt: Watchdog,
-        can_layer: CanLayerTy,
+        pub usb_data: UsbData<'static>,
+        pub wdt: Watchdog,
+        pub can_layer: CanLayerTy,
 
-        slave_can: SlaveCan,
-        soltcc: TccSol,
-        sensor_data: SensorData,
+        pub slave_can: SlaveCan,
+        pub soltcc: TccSol,
+        pub sensor_data: SensorData,
 
-        cpu_idle_ticks: AtomicU32,
-        hw_interrupts: AtomicU32,
-        dsu: &'static Arbiter<atsamd_hal::dsu::Dsu>
+        pub cpu_idle_ticks: AtomicU32,
+        pub hw_interrupts: AtomicU32,
+        pub dsu: &'static Arbiter<diag_common::hal_extensions::dsu::Dsu>
     }
 
     #[init(local = [
@@ -220,701 +189,49 @@ mod app {
         isotp_msg_signal_usb: Signal<SharedIsoTpBuf<ISOTP_BUF_SIZE>> = Signal::new(),
         arbiter_cantx: Option<Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>> = None
         arbiter_serial: Option<Arbiter<SerialPort<'static, UsbBus, DefaultBufferStore, DefaultBufferStore>>> = None,
-        dsu_init: Option<Arbiter<atsamd_hal::dsu::Dsu>> = None
+        dsu_init: Option<Arbiter<diag_common::hal_extensions::dsu::Dsu>> = None
     ])]
     fn init(cx: init::Context) -> (Shared, Resources) {
-        let mut device = cx.device;
-        let mut core: rtic::export::Peripherals = cx.core;
-        let pins = bsp::Pins::new(device.port);
-        let (mut buses, clocks, tokens) = clock_system_at_reset(
-            device.oscctrl,
-            device.osc32kctrl,
-            device.gclk,
-            device.mclk,
-            &mut device.nvmctrl,
-        );
-        // Steal PAC controller (We need mclk later)
-        let (_, _, _, mut mclk) = unsafe { clocks.pac.steal() };
-
-        // Enable watchdog alarm
-        let mut wdt = Watchdog::new(device.wdt);
-        wdt.feed();
-
-        // Obeying the max clock speeds for 125C operation (For AEC-Q100),
-        // the processor clock setup shall be configured as follows
-        //
-        //     OSCULP(32Khz)
-        //     ├── RTIC OS Monotonic
-        //     ├── GCLK 5 (32Khz)
-        //     │   └── EIC
-        //     └── Watchdog (2 sec timeout)
-        //
-        //     DFLL(48Mhz)
-        //     ├── GCLK1 (2Mhz)
-        //     │   ├── DPLL0(100Mhz)
-        //     C   │   └── GCLK0(100Mhz)
-        //     L   │       ├── TCC2 (TCC Solenoid)
-        //     K   │       └── F_CPU
-        //     │   │           └── QSPI
-        //     R   └── DPLL1(160Mhz)
-        //     E       ├── GCLK2(40Mhz)
-        //     C       │   └── CAN0
-        //     O       ├── GCLK3(80Mhz)
-        //     V       │   ├── ADC0
-        //     E       │   ├── ADC1
-        //     R       │   ├── SERCOM(s)
-        //     Y       │   └── TC0..4
-        //     │       └── GCLK4(160Mhz)
-        //     │           └── TCC0
-        //     └── GCLK6 (48Mhz)
-        //         └── USB
-
-        // Take GCLK1 from DFLL48 and divide by 12 to get 2Mhz
-        let (gclk1, dfll) = Gclk::from_source(tokens.gclks.gclk1, clocks.dfll);
-        let gclk1 = gclk1.div(GclkDiv16::Div(24)).enable(); // Gclk1 is now at 2Mhz
-        // Now configure both DPLLs. (loop div values from ATMEL SMART)
-        // DPLL0 loop div 50 = 100Mhz
-        // DPLL1 loop div 80 = 160Mhz
-        let (clk_dpll0, gclk1) = Pclk::enable(tokens.pclks.dpll0, gclk1);
-        let (clk_dpll1, _gclk1) = Pclk::enable(tokens.pclks.dpll1, gclk1);
-        // DPLL0 at 100Mhz (2*50)
-        let dpll0 = Dpll::from_pclk(tokens.dpll0, clk_dpll0)
-            .loop_div(50, 0)
-            .enable();
-        // DPLL1 at 160Mhz (2x80)
-        let dpll1 = Dpll::from_pclk(tokens.dpll1, clk_dpll1)
-            .loop_div(80, 0)
-            .enable();
-        // Now swap GCLK0 so it is using DPLL0 as a reference rather than DFLL
-        let (gclk0_100, dfll, _dpll0) = clocks.gclk0.swap_sources(dfll, dpll0);
-        // Switch DFLL to running with USB Clock recovery
-        let (dfll_usb, _old_mode) = dfll.into_mode(FromUsb, |_dfll| {});
-        let (gclk6, _dfll) = Gclk::from_source(tokens.gclks.gclk6, dfll_usb);
-        let gclk6_48 = gclk6.enable();
-
-        // Enable GCLK2 at 40Mhz (160/(4))
-        let (gclk2, dpll1) = Gclk::from_source(tokens.gclks.gclk2, dpll1);
-        let gclk2_40 = gclk2.div(GclkDiv8::Div(4)).enable();
-        // Enable GCLK3 at 80Mhz (160/(2))
-        let (gclk3, dpll1) = Gclk::from_source(tokens.gclks.gclk3, dpll1);
-        let gclk3_80 = gclk3.div(GclkDiv8::Div(2)).enable();
-        // Enable GCLK4 at 160Mhz (Match DPLL1 freq)
-        let (gclk4, _dpll1) = Gclk::from_source(tokens.gclks.gclk4, dpll1);
-        let gclk4_160 = gclk4.enable();
-
-        // Enable the 32Khz clock and start the RTIC Monotonic driver
-        let (osculp32k, _) = OscUlp32k::enable(tokens.osculp32k.osculp32k, clocks.osculp32k_base);
-        let (rtc, osc) = RtcOsc::enable(tokens.rtcosc, osculp32k);
-
-        // Low speed GCLK
-        let (gclk5, _osc) = Gclk::from_source(tokens.gclks.gclk5, osc);
-        let gclk5_32k = gclk5.enable();
-
-        // Start RTIC system
-        Mono::start(device.rtc);
-
-        // Grab our version info
-        let mut nvm = Nvm::new(device.nvmctrl);
-        if let Ok(smart_eeprom) = nvm.smart_eeprom() {
-            let mut smart_eeprom = match smart_eeprom {
-                SmartEepromMode::Locked(smart_eeprom) => smart_eeprom.unlock(),
-                SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
-            };
-            mutate_smarteeprom_info(&mut smart_eeprom, |info| {
-                const SECTION_INFO: CodeSectionInfo = create_code_info(*b"UN52PICEGS");
-                if info.firmware_info != SECTION_INFO {
-                    info.firmware_info = SECTION_INFO
-                }
-            });
-        }
-
-        // Init ADCs
-        let (pclk_adc0, gclk3_80) = Pclk::enable(tokens.pclks.adc0, gclk3_80);
-        let (pclk_adc1, gclk3_80) = Pclk::enable(tokens.pclks.adc1, gclk3_80);
-        let apb_adc0 = buses.apb.enable(tokens.apbs.adc0);
-        let apb_adc1 = buses.apb.enable(tokens.apbs.adc1);
-        let adc0_pins = Adc0Pins {
-            tsen_tl8242: pins.tsen_tle8242.into(),
-            tsen_pcb: pins.tsen_pcb.into(),
-        };
-        let adc1_pins = Adc1Pins {
-            ac_p: pins.accel_p.into(),
-            tft: pins.tft.into(),
-            pmon_kl15: pins.pmon_kl15.into(),
-            pmon_kl87: pins.pmon_kl87.into(),
-            pmon_sens: pins.pmon_sensors.into(),
-            pmon_kl87_diag: pins.pmon_kl87_diag.into(),
-        };
-
-        let adc_variable_inputs = Adc1VariableInputs {
-            gpio_1: None,
-            gpio_2: None,
-            gpio_3: None,
-            ac_m_brk: VariableAdcInput::new(pins.accel_m_or_brake, pins.scale_drp_acm),
-        };
-
-        let adc_data = AdcData::new(
-            device.adc0,
-            device.adc1,
-            device.supc,
-            adc0_pins,
-            adc1_pins,
-            adc_variable_inputs,
-            apb_adc0,
-            apb_adc1,
-            pclk_adc0,
-            pclk_adc1,
-        );
-
-        // Event system and RPM sensor setup
-        let evsys_channels = evsys::EvSysController::new(&mut mclk, device.evsys).split();
-        let (pclk_evsys, _gclk5_32k) = Pclk::enable(tokens.pclks.eic, gclk5_32k);
-        let mut eic = Eic::new(&mut mclk, &pclk_evsys.into(), device.eic);
-        //eic.switch_to_osc32k(&rtc);
-        let eic_channels = eic.split();
-
-        // DMA Init (SPI + I2C Requires this)
-        let dmac = DmaController::init(device.dmac, &mut device.pm);
-        let mut fut_dmac = dmac.into_future(DmacIrqs);
-        let dma_channels = fut_dmac.split();
-        // Init channels
-        let dma_ch0 = dma_channels.0.init(PriorityLevel::Lvl0); // TLE8242 SPI
-        let dma_ch1 = dma_channels.1.init(PriorityLevel::Lvl0); // TLE8242 SPI
-        let dma_ch2 = dma_channels.2.init(PriorityLevel::Lvl0); // EEPROM I2C
-
-        let (tcc01_clock, gclk4_160) = Pclk::enable(tokens.pclks.tcc0_tcc1, gclk4_160);
-        let tcc01_clock_compat = tcc01_clock.into();
-        // Much better resolution to run this at 100Mhz vs 160Mhz
-        let (tcc23_clock, gclk0_100) = Pclk::enable(tokens.pclks.tcc2_tcc3, gclk0_100);
-
-        // -- TCC Solenoid init  --
-        let sol_tcc = TccSol::new(
-            device.tcc2,
-            device.tcc3,
-            &tcc23_clock.into(),
-            pins.tcc_pwm.into(),
-            pins.tcc_cutoff.into(),
-            pins.tcc_fdbk.into(),
-            eic_channels.11,
-            &mut mclk,
-            evsys_channels.5,
-            evsys_channels.6,
-            evsys_channels.7,
-        );
-
-        // -- TLE8242 init --
-
-        // Init SPI
-        let (pclk_sercom6, gclk3_80) = Pclk::enable(tokens.pclks.sercom6, gclk3_80);
-        let spi = bsp::tle_spi(
-            pclk_sercom6,
-            TLE_SPI_BAUD,
-            device.sercom6,
-            &mut mclk,
-            pins.tle_sck,
-            pins.tle_si,
-            pins.tle_so,
-        );
-        let spi_fut = spi.into_future(Sercom6Irqs);
-        let spi_fut_dma = spi_fut.with_dma_channels(dma_ch0, dma_ch1);
-
-        let tle8242_pins = Tle8242Pins {
-            phase_sync: pins.tle_phase_sync.into(),
-            fault: pins.tle_fault.into(),
-            reset: pins.tle_reset.into(),
-            enable: pins.tle_en.into(),
-            clk: pins.tle_clk.into(),
-            cs: pins.tle_cs.into(),
-            led: pins.led_tle.into(),
-        };
-
-        let tle8242: Tle8242<dmac::Ch0, dmac::Ch1> = Tle8242::new(
-            tle8242_pins,
-            spi_fut_dma,
-            &mut mclk,
-            &tcc01_clock_compat,
-            device.tcc0,
-        );
-
-        // -- EEPROM init -- //
-        let (pclk_sercom2, gclk3_80) = Pclk::enable(tokens.pclks.sercom2, gclk3_80);
-        let i2c = bsp::eeprom(
-            pclk_sercom2,
-            device.sercom2,
-            400u32.kHz(),
-            &mut mclk,
-            pins.eeprom_sda,
-            pins.eeprom_scl,
-        )
-        .into_future(Sercom2Irqs)
-        .with_dma_channel(dma_ch2);
-
-        let dsu_pac = atsamd_hal::dsu::Dsu::new(device.dsu, &device.pac).unwrap();
-        let dsu = cx.local.dsu_init.insert(Arbiter::new(dsu_pac));
-
-        let eeprom = crate::storage::eeprom::Eeprom::new(i2c, dsu);
-
-        let solenoid_io = SolenoidControler::new(tle8242, pins.power_en_sol.into());
-
-        // Enable sensor power supply (Testing)
-        pins.power_en_sensors
-            .into_push_pull_output()
-            .set_high()
-            .unwrap();
-
-        // Speed sensors init
-        let (pclk_tc01, gclk3_80) = Pclk::enable(tokens.pclks.tc0_tc1, gclk3_80);
-        let (pclk_tc23, _gclk3_80) = Pclk::enable(tokens.pclks.tc2_tc3, gclk3_80);
-
-        let n2_pcnt: IntN2RpmPc = init_speed_sensor(
-            pins.rpm_n2,
-            eic_channels.2,
-            evsys_channels.0,
-            &mut mclk,
-            device.tc0,
-            &pclk_tc01,
-        );
-
-        let n3_pcnt: IntN3RpmPc = init_speed_sensor(
-            pins.rpm_n3,
-            eic_channels.3,
-            evsys_channels.1,
-            &mut mclk,
-            device.tc1,
-            &pclk_tc01,
-        );
-
-        let all_spd_sensors = AllSpeedSensors::new(n2_pcnt, n3_pcnt, None, None, None);
-
-        // -- CAN init --
-        let (clk_can, _gclk2_40) = Pclk::enable(tokens.pclks.can0, gclk2_40);
-        let (can0_deps, gclk0_100) = Dependencies::new(
-            gclk0_100,
-            clk_can,
-            clocks.ahbs.can0,
-            pins.can_rx.into_mode(),
-            pins.can_tx.into_mode(),
-            device.can0,
-        );
-
-        let can_layer = CanLayerTy::Egs52(Egs52Can::new());
-
-        let mut can0_cfg =
-            mcan::bus::CanConfigurable::new(HertzU32::Hz(500_000), can0_deps, cx.local.message_ram)
-                .unwrap();
-        // Push diagnostic Rx filter ID
-        can0_cfg
-            .filters_standard()
-            .push(Filter::Classic {
-                action: mcan::filter::Action::StoreFifo0,
-                filter: CAN_ID_DIAG_RX,
-                mask: StandardId::MAX,
-            })
-            .ok();
-        // Push slave mode Rx Frame
-        can0_cfg
-            .filters_standard()
-            .push(Filter::Classic {
-                action: mcan::filter::Action::StoreFifo0,
-                filter: slave::SolenoidControl::CAN_ID,
-                mask: StandardId::MAX,
-            })
-            .ok();
-        for filter in can_layer.filters() {
-            if can0_cfg
-            .filters_standard()
-            .push(Filter::Classic {
-                action: mcan::filter::Action::StoreFifo0,
-                filter: filter.id,
-                mask: filter.mask,
-            }).is_err() {
-                defmt::error!("Could not allocate CAN Filter for (ID: 0x{:04X}, MSK: 0x{:04X})", filter.id.as_raw(), filter.mask.as_raw());
-                break;
-            }
-        }
-
-        println!("RAM: {:08X}, buf: {:08X} LEN: {}", ram_test::ram_start(), ram_test::ram_buf_ptr(), ram_test::ram_buf_size());
-
-        // Enable new MSG interrupt for FIFO0
-        let interrupts = can0_cfg
-            .interrupts()
-            .split([Interrupt::RxFifo0NewMessage].iter().copied().collect())
-            .unwrap();
-        let line0_interrupts = can0_cfg.interrupt_configuration().enable_line_0(interrupts);
-        let mut can = can0_cfg.finalize().unwrap();
-        let arbiter_cantx: &'static _ = cx.local.arbiter_cantx.insert(Arbiter::new(can.tx));
-        let (isotp_isr, isotp_thread) = make_isotp_endpoint(
-            Id::Standard(CAN_ID_DIAG_TX),
-            Id::Standard(CAN_ID_DIAG_RX),
-            Some(can_deps::CAN_TX_MAILBOX_DIAG),
-            arbiter_cantx,
-            cx.local.isotp_can_fc_signal,
-            cx.local.isotp_msg_signal_can,
-        );
-
-        // Init USB
-        let (usb_clock, _gclk2_48) = Pclk::enable(tokens.pclks.usb, gclk6_48);
-        let usb_bus = UsbBus::new(
-            &(usb_clock.into()),
-            &mut mclk,
-            pins.usb_dm,
-            pins.usb_dp,
-            device.usb,
-        );
-        // Bus allocator
-        let usb_alloc: &'static _ = cx.local.usb_alloc.insert(UsbBusAllocator::new(usb_bus));
-        // SerialPort CDC
-        let uart: &'static _ = cx
-            .local
-            .arbiter_serial
-            .insert(Arbiter::new(SerialPort::new(usb_alloc)));
-        // Write down the device serial number in ASCII form
-        let sn = serial_number();
-        for b in sn {
-            let _ = cx.local.usb_sn.push_str(&format!(2; "{b:02X}").unwrap());
-        }
-        // Build up the USB device
-        let usb =
-            UsbDeviceBuilder::new(usb_alloc, UsbVidPid(0x16c0, 0x27de), cx.local.usb_ctrl_buf)
-                .strings(&[StringDescriptors::default()
-                    .manufacturer("rnd-ash")
-                    .product("Ultimate NAG52 V2")
-                    .serial_number(cx.local.usb_sn)])
-                .expect("Failed to set strings")
-                .device_class(USB_CLASS_CDC)
-                .usb_rev(UsbRev::Usb200)
-                .build()
-                .unwrap();
-        // Configure the USB ISOTP endpoint (Over serial)
-        let (isotp_usb_tx, isotp_usb_thread) = new_usb_isotp(uart, cx.local.isotp_msg_signal_usb);
-        let usb_data = UsbData {
-            led: pins.led_usb.into(),
-            dev: usb,
-            isotp: isotp_usb_tx,
-        };
-
-        async_init::spawn(arbiter_cantx, eeprom, solenoid_io)
-            .unwrap_or_else(|_| panic!("Could not start async init"));
-        cpu_monitor::spawn().unwrap();
-
-        wdt.feed();
-        (
-            Shared {
-                usb_data,
-                wdt,
-                can_layer,
-                slave_can: SlaveCan::new(),
-                soltcc: sol_tcc,
-                sensor_data: SensorData::default(),
-                cpu_idle_ticks: AtomicU32::new(0),
-                hw_interrupts: AtomicU32::new(0),
-                dsu
-            },
-            Resources {
-                adc_data,
-                speed_sensors: all_spd_sensors,
-                can0_fifo0: can.rx_fifo_0,
-                can0_interrupts: line0_interrupts,
-                isotp_isr,
-                isotp_thread,
-                usb_isotp_thread: isotp_usb_thread,
-
-                diag_server: KwpServer::new(),
-            },
-        )
-    }
-
-    #[idle(shared=[&cpu_idle_ticks, &hw_interrupts, &dsu])]
-    fn idle(ctx: idle::Context) -> ! {
-        let (mut dwt, mut dcb) = unsafe {
-            let p = cortex_m::Peripherals::steal();
-            (p.DWT, p.DCB)
-        };
-        dcb.enable_trace();
-        dwt.enable_cycle_counter();
-        // Size of each RAM test
-        let ram_test_size: usize = ram_test::ram_buf_size();
-        let ram_test_buf_addr: *mut u8 = ram_test::ram_buf_ptr();
-        let ram_start = ram_test::ram_start();
-
-        // Max address in RAM to test (Ensuring it doesn't
-        // overwrite the idle task stack)
-        let mut ram_test_end: u32 = 0x2000_0000 + (256*1024);
-        let mut ram_offset = 0;
-
-        #[inline(always)]
-        fn set_stack_watermark(watermark: &mut u32) {
-            let dummy = 0;
-            let addr = addr_of!(dummy).addr() as u32;
-            // since stack decreases
-            if addr < *watermark {
-                // Round down to nearest 4KB
-                *watermark = (addr/4096)*4096;
-            }
-        }
-        // Pesimistic view of stack watermark,
-        // so we don't write into the stack
-        set_stack_watermark(&mut ram_test_end);
-        let mut ram_test_done = false;
-        loop {
-            // Stop interrupts from context switch
-            let count = cortex_m::interrupt::free(|_| {
-                // Wait for something to wake up the CPU
-                if !ram_test_done && let Some(mut lock) = ctx.shared.dsu.try_access() {
-                    unsafe {
-                        // Copy RAM to temp buffer
-                        let ram_ptr = (ram_start+ram_offset) as *mut u8;
-                        ram_ptr.copy_to(ram_test_buf_addr, ram_test_size);
-                        // Guaranteed alignment
-                        let test = lock.polling_memory_test(ram_ptr.addr() as u32, ram_test_size as u32).unwrap();
-                        dwt.set_cycle_count(0);
-                        wfi();
-                        let dwt_count = DWT::cycle_count();
-                        let test_res = test.finish_now();
-                        // Copy ram back
-                        ram_test_buf_addr.copy_to(ram_ptr, ram_test_size);
-                        match test_res {
-                            MemoryTestResult::Ok=> {
-                                ram_offset += ram_test_size as u32;
-                                if (ram_start+ram_offset) > ram_test_end {
-                                    ram_test_done = true;
-                                    ram_offset = 0;
-                                }
-                            }
-                            MemoryTestResult::Aborted => {
-                                // Aborted, so don't increase counter
-                            },
-                            MemoryTestResult::Error(error) => {
-                                if let atsamd_hal::dsu::Error::RamTestFailed { addr, phase, bit } = error {
-                                    modify_bootloader_info(|info| {
-                                        info.ram_failure = Some((addr, bit, phase));
-                                    });
-                                    SCB::sys_reset();
-                                }
-                            },
-                        }
-                        dwt_count
-                    }
-                } else {
-                    dwt.set_cycle_count(0);
-                    wfi();
-                    DWT::cycle_count()
-                }
-            });
-            // Write down CPU usage after interrupt performed (Lowers latency to interrupt)
-            ctx.shared
-                .cpu_idle_ticks
-                .fetch_add(count, Ordering::Relaxed);
-
-            let nvic = unsafe {
-                cortex_m::Peripherals::steal().NVIC
-            };
-
-            let pending: u32 = nvic.ispr
-                .iter()
-                .map(|x| x.read().count_ones())
-                .sum();
-
-            ctx.shared.hw_interrupts.fetch_add(pending, Ordering::Relaxed);
-        }
-    }
-
-    #[task(priority = 2, shared=[wdt, &cpu_idle_ticks, &hw_interrupts])]
-    async fn cpu_monitor(mut ctx: cpu_monitor::Context) {
-        const TPS: u32 = 100_000_000;
-        const SECOND_MILLIS: u32 = 1000;
-        const UPDATES_PER_SEC: u32 = 2;
-        const MAX_TICKS_PER_UPDATE: u32 = TPS / UPDATES_PER_SEC;
-        loop {
-            let now = Mono::now();
-            // Reset
-            let asleep_ticks = ctx.shared.cpu_idle_ticks.swap(0, Ordering::Relaxed);
-            let interrupts = ctx.shared.hw_interrupts.swap(0, Ordering::Relaxed);
-            let percentage: f32 =
-                ((MAX_TICKS_PER_UPDATE - asleep_ticks) * 100) as f32 / MAX_TICKS_PER_UPDATE as f32;
-            info!("CPU: {:02}% - HW Interrupts: {}", percentage, interrupts);
-            ctx.shared.wdt.lock(|wdt| wdt.feed());
-            Mono::delay_until(now + ((SECOND_MILLIS / UPDATES_PER_SEC) as u64).millis()).await;
-        }
-    }
-
-    #[task(priority = 2, local = [usb_isotp_thread, isotp_thread, diag_server])]
-    async fn diag_task(cx: diag_task::Context) {
-        let diag_task::LocalResources {
-            usb_isotp_thread,
-            isotp_thread,
-            diag_server,
-            ..
-        } = cx.local;
-        let mut is_usb: bool = false;
-        loop {
-            let deadline = Mono::now() + 20u64.millis();
-
-            futures::select_biased! {
-                buf = isotp_thread.read_payload().fuse() => {
-                    is_usb = false;
-                    let response = diag_server.process_cmd(
-                        buf.payload(),
-                        Mono::now().duration_since_epoch().to_millis(),
-                    );
-                    let _ = isotp_thread.write_payload(&mut Mono, response).await;
-                },
-                buf = usb_isotp_thread.read().fuse() => {
-                    is_usb = true;
-                    let response = diag_server.process_cmd(
-                        buf.payload(),
-                        Mono::now().duration_since_epoch().to_millis(),
-                    );
-                    let _ = usb_isotp_thread.write(response).await;
-                },
-                _ = Mono::delay_until(deadline).fuse() => {
-                    // Fallthrough so we update KWP server
-                }
-            }
-            if let Some(tx) = diag_server
-                .update(Mono::now().duration_since_epoch().to_millis())
-                .await
-            {
-                match is_usb {
-                    true => {
-                        let _ = usb_isotp_thread.write(tx).await;
-                    }
-                    false => {
-                        let _ = isotp_thread.write_payload(&mut Mono, tx).await;
-                    }
-                }
-            }
-        }
+        tasks::init(cx)
     }
 
     #[task(priority = 1)]
     async fn async_init(
-        _: async_init::Context,
+        ctx: async_init::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
-        mut eeprom: Eeprom<dmac::Ch2>,
-        mut solenoid_io: SolenoidControler<dmac::Ch0, dmac::Ch1>,
+        eeprom: Eeprom<dmac::Ch2>,
+        solenoid_io: SolenoidControler<dmac::Ch0, dmac::Ch1>,
     ) {
-        if let Some(info) = diag_common::ram_info::get_bootloader_comm_info() {
-            println!("BL INFO COUNTER: {}", info.reset_counter);
-        } else {
-            defmt::error!("BL INFO CORRUPT");
-            let addr = 0x20010000 as *const u8;
-            let arr = unsafe { ptr::slice_from_raw_parts(addr, 512).as_ref().unwrap() };
-            println!("{:02X}", arr);
-        }
-        adc_task::spawn().unwrap();
-        eeprom.init().await;
-        solenoid_io.init().await;
-        gearbox_task::spawn(can_tx, solenoid_io)
-            .unwrap_or_else(|_| panic!("Could not start async init"));
-        diag_task::spawn().unwrap();
-        // Wait 5 seconds - Most likely a crash will happen whilst all the async tasks
-        // are initializing
-        Mono::delay(5000u64.millis()).await;
-        // Now reset the reset counter
-        diag_common::ram_info::modify_bootloader_info(|info| {
-            info.reset_counter = 0;
-        });
+        tasks::async_init(ctx, can_tx, eeprom, solenoid_io).await;
+    }
+
+    #[idle(shared=[&cpu_idle_ticks, &hw_interrupts, &dsu])]
+    fn idle(ctx: idle::Context) -> ! {
+        tasks::idle(&ctx)
+    }
+
+    #[task(priority = 2, shared=[wdt, &cpu_idle_ticks, &hw_interrupts])]
+    async fn perf_monitor(ctx: perf_monitor::Context, tps: u32) {
+        tasks::performance_monitor(ctx, tps).await;
+    }
+
+    #[task(priority = 2, local = [usb_isotp_thread, isotp_thread, diag_server])]
+    async fn diag_task(cx: diag_task::Context) {
+        tasks::diag_task(cx).await
     }
 
     #[task(priority = 1, local=[adc_data, speed_sensors], shared=[sensor_data])]
-    async fn adc_task(mut cx: adc_task::Context) {
-        loop {
-            let now = Mono::now();
-            let speed_sensors = cx.local.speed_sensors.update();
-            let mut data = cx.local.adc_data.update().await;
-            cx.shared.sensor_data.lock(|l| *l = data);
-            Mono::delay_until(now + 10u64.millis()).await;
-        }
+    async fn sensor_query(cx: sensor_query::Context) {
+        tasks::sensor_query(cx).await;
     }
 
     #[task(priority = 2, shared=[can_layer, slave_can, soltcc, sensor_data])]
     async fn gearbox_task(
-        mut cx: gearbox_task::Context,
+        cx: gearbox_task::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
-        mut solenoid_controller: SolenoidControler<dmac::Ch0, dmac::Ch1>,
+        solenoid_controller: SolenoidControler<dmac::Ch0, dmac::Ch1>,
     ) {
-        // Gearbox has started, set device mode
-        DEVICE_MODE.store(EgsDeviceMode::SLAVE.bits(), Ordering::Relaxed);
-        let mut can_input = CanRxSignals::default();
-        let mut can_output = CanTxSignals::default();
-        loop {
-            let now = Mono::now();
-            let mode = EgsDeviceMode::from_bits_retain(DEVICE_MODE.load(Ordering::Relaxed));
-            let sensor_data = cx.shared.sensor_data.lock(|l| l.clone());
-
-            if !mode.contains(EgsDeviceMode::SLAVE) {
-                cx.shared
-                    .can_layer
-                    .lock(|lck| lck.read_signals(&mut can_input));
-                // Gearbox stuff
-                let mut can = can_tx.access().await;
-                let _ = cx.shared.can_layer.lock(|lck| {
-                    lck.write_signals(&can_output);
-                    lck.transmit(&mut can)
-                });
-            } else {
-                // Slave mode has special logic
-                use can::CanLayer;
-                let mut control_frame = SolenoidControl::ZERO;
-                cx.shared
-                    .slave_can
-                    .lock(|lck| lck.read_signals(&mut control_frame));
-
-                let spc_req = control_frame.spc_req().swap_bytes();
-                let mpc_req = control_frame.mpc_req().swap_bytes();
-                let tcc_req = control_frame.tcc_req();
-
-                solenoid_controller.set_mpc_current(mpc_req).await;
-                solenoid_controller.set_spc_current(spc_req).await;
-                solenoid_controller.set_y3(control_frame.y_3_en()).await;
-                solenoid_controller.set_y4(control_frame.y_4_en()).await;
-                solenoid_controller.set_y5(control_frame.y_5_en()).await;
-                solenoid_controller.update_task().await;
-
-                let observed_pwm = cx.shared.soltcc.lock(|tcc| {
-                    solenoid_controller.set_tcc_pwm((tcc_req as u16) << 8, tcc);
-                    solenoid_controller.get_observed_tcc_pwm(tcc)
-                }) >> 8;
-
-                // Actuate solenoids
-                // Todo - Only do delay and second query if first failed
-                let mut rpt = SolenoidReport::ZERO;
-                let mut sensor_rpt = SensorReport::ZERO;
-                let spc_current = solenoid_controller.read_spc_current();
-                let mpc_current = solenoid_controller.read_mpc_current();
-
-                rpt.set_mpc_curr(mpc_current.swap_bytes());
-                rpt.set_spc_curr(spc_current.swap_bytes());
-                rpt.set_tcc_pwm(observed_pwm as u8);
-                rpt.set_y_3_on(solenoid_controller.read_y3_current() > 100);
-                rpt.set_y_4_on(solenoid_controller.read_y4_current() > 100);
-                rpt.set_y_5_on(solenoid_controller.read_y5_current() > 100);
-
-                match sensor_data.tft {
-                    TftState::Pll => sensor_rpt.set_tft(0xFF),
-                    TftState::Temperature(temp) => {
-                        sensor_rpt.set_tft((temp + 50) as u8);
-                    }
-                }
-                sensor_rpt.set_vbatt((sensor_data.vkl15 / 100) as u8);
-                sensor_rpt.set_n_2_raw(sensor_data.ikl87);
-                //sensor_rpt.set_n_3_raw(sensor_data.n3_rpm * 50);
-
-                let fr = FullReport {
-                    solenoids: rpt,
-                    sensors: sensor_rpt,
-                };
-
-                let mut can = can_tx.access().await;
-                let _ = cx.shared.slave_can.lock(|lck| {
-                    lck.write_signals(&fr);
-                    lck.transmit(&mut can)
-                });
-            }
-
-            Mono::delay_until(now + 20u64.millis()).await;
-        }
+        tasks::gearbox_task(cx, can_tx, solenoid_controller).await;
     }
 
     // -- HARDWARE TASKS BELOW --
@@ -934,13 +251,28 @@ mod app {
         cx.shared.usb_data.poll();
     }
 
-    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, isotp_isr], shared=[can_layer, slave_can])]
+    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, can0_dedicated, isotp_isr], shared=[can_layer, slave_can])]
     fn can0(mut cx: can0::Context) {
         let mut buf = [0; 8];
         for interrupt in cx.local.can0_interrupts.iter_flagged() {
             match interrupt {
+                Interrupt::MessageStoredToDedicatedRxBuffer => {
+                    while let Ok(msg) = cx.local.can0_dedicated.receive_any() {
+                        if msg.id() == cx.local.isotp_isr.rx_id {
+                            cx.local.isotp_isr.on_frame_rx(msg.data(), 2, 8);
+                        } else {
+                            buf[0..msg.dlc() as usize].copy_from_slice(msg.data());
+                            cx.shared.can_layer.lock(|lck| {
+                                lck.on_frame(msg.id(), &buf);
+                            });
+                            cx.shared.slave_can.lock(|lck| {
+                                lck.on_frame(msg.id(), &buf);
+                            })
+                        }
+                    }
+                }
                 Interrupt::RxFifo0NewMessage => {
-                    for msg in cx.local.can0_fifo0.into_iter() {
+                    for msg in &mut cx.local.can0_fifo0 {
                         if msg.id() == cx.local.isotp_isr.rx_id {
                             cx.local.isotp_isr.on_frame_rx(msg.data(), 2, 8);
                         } else {
@@ -989,7 +321,7 @@ static DEVICE_MODE: AtomicU16 = AtomicU16::new(EgsDeviceMode::INITIALIZATION.bit
 
 #[exception(trampoline = false)]
 unsafe fn HardFault() -> ! {
-    loop{}
+    panic!("Hard fault detected")
 }
 
 #[exception]

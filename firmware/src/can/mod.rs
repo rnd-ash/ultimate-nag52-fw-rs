@@ -33,7 +33,7 @@ macro_rules! rxframe_default {
 macro_rules! handle_frames {
     // Self (Can layer), ID - Can  ID, data: CAN Data, match exprs
     ( $self:ident, $id:expr, $data:expr, $( ($field:ident, $ty:ty) ),* $(,)? ) => {
-        use crate::can::embedded_can::Id;
+        use $crate::can::embedded_can::Id;
         match $id {
             $(
                 // Can frame ID match
@@ -93,6 +93,15 @@ impl<T: Copy> RxFrame<T> {
 pub struct CanFilter {
     pub id: StandardId,
     pub mask: StandardId
+}
+
+impl CanFilter {
+    pub const fn new_1_id(id: StandardId) -> Self {
+        Self {
+            id,
+            mask: StandardId::MAX
+        }
+    }
 }
 
 pub trait CanLayer<I, O> {

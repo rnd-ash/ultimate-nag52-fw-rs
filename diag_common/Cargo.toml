@@ -13,9 +13,13 @@ mcu = [
     "dep:usb-device",
     "dep:usbd-serial",
     "dep:nb",
+    "dep:atsamd-hal"
 ]
 
+defmt-serial=[]
+
 [dependencies]
+atsamd-hal = {workspace=true, optional=true}
 automotive_diag = { version = "0.1.21", default-features = false, features = [
     "kwp2000",
     "defmt",
@@ -33,3 +37,4 @@ usbd-serial = { version = "0.2.2", optional = true }
 nb = { version = "1.1.0", optional = true }
 static_assertions = "1.1.0"
 embedded-crc32c = "0.1.0"
+konst = { version = "0.4.1", features = ["iter"] }

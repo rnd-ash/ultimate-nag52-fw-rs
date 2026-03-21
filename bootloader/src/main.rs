@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use crate::bl_info::MemoryRegion;
+use diag_common::{MemoryRegion, parse_git_sha, parse_u8, smarteeprom::CodeSectionInfo};
 
 use atsamd_hal::{
     can::Dependencies,
@@ -16,7 +16,7 @@ use atsamd_hal::{
     ehal::digital::{InputPin, OutputPin},
     fugit::ExtU64,
     fugit::HertzU32,
-    gpio::{Alternate, F, PD08},
+    gpio::{Alternate, F},
     nvm::Nvm,
     pac::Peripherals,
     prelude::_embedded_hal_Pwm,
@@ -30,7 +30,7 @@ use atsamd_hal::{
         UsbBus,
         usb_device::{
             bus::UsbBusAllocator,
-            device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid},
+            device::{StringDescriptors, UsbDeviceBuilder, UsbVidPid},
         },
     },
     watchdog::*,
@@ -59,12 +59,32 @@ use usbd_serial::{SerialPort, USB_CLASS_CDC};
 use crate::kwp::KwpServer;
 
 use diag_common::ram_info::*;
-mod bl_info;
 pub mod kwp;
 pub mod usb;
 
 pub static ST_MIN_EGS: AtomicU8 = AtomicU8::new(0x02);
 pub static BS_EGS: AtomicU8 = AtomicU8::new(0x08);
+
+pub const fn create_code_info(name: [u8; 10]) -> CodeSectionInfo {
+    CodeSectionInfo {
+        name,
+        git_sha: parse_git_sha(env!("VERGEN_GIT_SHA")),
+        version_major: parse_u8(env!("CARGO_PKG_VERSION_MAJOR")),
+        version_minor: parse_u8(env!("CARGO_PKG_VERSION_MINOR")),
+        version_patch: parse_u8(env!("CARGO_PKG_VERSION_PATCH")),
+        compile_year: parse_u8(env!("BUILD_YEAR")),
+        compile_month: parse_u8(env!("BUILD_MONTH")),
+        compile_week: parse_u8(env!("BUILD_WEEK")),
+        compile_day: parse_u8(env!("BUILD_DAY")),
+        rustc_version_major: parse_u8(env!("RUSTC_VER_MAJOR")),
+        rustc_version_minor: parse_u8(env!("RUSTC_VER_MINOR")),
+        rustc_version_patch: parse_u8(env!("RUSTC_VER_PATCH")),
+        #[cfg(debug_assertions)]
+        is_debug: 1,
+        #[cfg(not(debug_assertions))]
+        is_debug: 0,
+    }
+}
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -85,7 +105,7 @@ pub const CAN_ID_RX: StandardId = unsafe { StandardId::new_unchecked(0x7E1) };
 // memory.x
 const RAM_START_ADDR: u32 = 0x20040000;
 
-fn can_app_start(bl_info: &crate::bl_info::SmartEepromInfo) -> bool {
+fn can_app_start(bl_info: &diag_common::smarteeprom::SmartEepromInfo) -> bool {
     // Check app actually exists (Check for vector table)
     let stack_ptr = unsafe { (MemoryRegion::Application.start_addr() as *const u32).read() };
     let stack_addr_ok = stack_ptr == RAM_START_ADDR;
@@ -104,10 +124,9 @@ mod app {
     use atsamd_hal::{
         clock::v2::types::Can0,
         dsu::Dsu,
-        gpio::{PD09, PD12},
+        gpio::{PD12},
     };
     use automotive_diag::kwp2000::KwpSessionType;
-    use bootloader::bl_info::CodeSectionInfo;
     use bsp::can_deps::CAN_TX_MAILBOX_DIAG;
     use diag_common::{
         BootloaderStayReason,
@@ -115,7 +134,7 @@ mod app {
             SharedIsoTpBuf,
             can_isotp::{IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg, make_isotp_endpoint},
             usb_isotp::{UsbIsoTpConsumer, new_usb_isotp},
-        },
+        }, smarteeprom::mutate_smarteeprom_info,
     };
     use usbd_serial::DefaultBufferStore;
 
@@ -145,8 +164,6 @@ mod app {
     struct Shared {
         #[lock_free]
         usb: UsbData<'static>,
-        #[lock_free]
-        old_bootloader_info: BootloaderRamInfo,
     }
 
     #[init(local = [
@@ -163,7 +180,7 @@ mod app {
     ])]
     fn init(cx: init::Context) -> (Shared, Resources) {
         // Check for good app and try to bootload
-        let mut device = cx.device;
+        let device = cx.device;
         let mut core: rtic::export::Peripherals = cx.core;
         let pins = bsp::Pins::new(device.port);
         let mut start_diag_in_reprog_mode = false;
@@ -182,9 +199,9 @@ mod app {
                         smart_eeprom
                     }
                 };
-                bl_info::mutate_smarteeprom_info(&mut eeprom, |info| {
-                    const FW_INFO: bl_info::CodeSectionInfo =
-                        bl_info::create_code_info(*b"UN52PICBLD");
+                mutate_smarteeprom_info(&mut eeprom, |info| {
+                    const FW_INFO: CodeSectionInfo =
+                        create_code_info(*b"UN52PICBLD");
                     if info.bootloader_info != FW_INFO {
                         info.bootloader_info = FW_INFO;
                     }
@@ -258,10 +275,8 @@ mod app {
                     create_default_comm_info();
                 }
 
-                if BootloaderStayReason::None == reset_reason {
-                    if !can_app_start(&see_info) {
-                        reset_reason = BootloaderStayReason::AppInvalid;
-                    }
+                if BootloaderStayReason::None == reset_reason && !can_app_start(&see_info) {
+                    reset_reason = BootloaderStayReason::AppInvalid;
                 }
 
                 if can_app_start(&see_info) && continue_boot {
@@ -441,7 +456,6 @@ mod app {
         (
             Shared {
                 usb: usb_data,
-                old_bootloader_info,
             },
             Resources {
                 tcc_led,
@@ -537,19 +551,16 @@ mod app {
 
     #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, isotp_isr])]
     #[unsafe(link_section = ".data.can0")]
-    fn can0(cx: can0::Context) {
+    fn can0(mut cx: can0::Context) {
         for interrupt in cx.local.can0_interrupts.iter_flagged() {
-            match interrupt {
-                Interrupt::RxFifo0NewMessage => {
-                    for msg in cx.local.can0_fifo0.into_iter() {
-                        if msg.id() == cx.local.isotp_isr.rx_id {
-                            let stmin = ST_MIN_EGS.load(Ordering::Relaxed);
-                            let bs = BS_EGS.load(Ordering::Relaxed);
-                            cx.local.isotp_isr.on_frame_rx(msg.data(), stmin, bs);
-                        }
+            if let Interrupt::RxFifo0NewMessage = interrupt {
+                for msg in &mut cx.local.can0_fifo0 {
+                    if msg.id() == cx.local.isotp_isr.rx_id {
+                        let stmin = ST_MIN_EGS.load(Ordering::Relaxed);
+                        let bs = BS_EGS.load(Ordering::Relaxed);
+                        cx.local.isotp_isr.on_frame_rx(msg.data(), stmin, bs);
                     }
                 }
-                _ => {}
             }
         }
     }

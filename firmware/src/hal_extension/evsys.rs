@@ -30,7 +30,6 @@
 //! which is not supported by all receiving peripherals. Consult the chip datasheet
 use atsamd_hal::pac::Evsys;
 use atsamd_hal::pac::Mclk;
-use atsamd_hal::with_num_channels;
 use core::marker::PhantomData;
 use seq_macro::seq;
 

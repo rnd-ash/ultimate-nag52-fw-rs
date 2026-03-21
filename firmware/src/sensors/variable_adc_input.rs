@@ -9,11 +9,10 @@
 //! SCALE_DROP high : R1 = 12000 Ohm, R2 = 3300 Ohm
 
 use atsamd_hal::{
-    adc::{Adc1, AdcInstance, AdcPin, FutureAdc},
+    adc::{Adc1, AdcPin, FutureAdc},
     ehal::digital::{OutputPin, StatefulOutputPin},
     gpio::{AlternateB, Pin, PinId, PushPullOutput},
 };
-use defmt::println;
 
 use crate::Adc1Irqs;
 

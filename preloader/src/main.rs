@@ -4,14 +4,11 @@
 use core::{panic::PanicInfo};
 
 use atsamd_hal::{
-    clock::v2::{clock_system_at_reset, dpll::Dpll, gclk::{Gclk, GclkDiv16}, pclk::Pclk}, dsu::Dsu, ehal::digital::OutputPin, nvm::{Nvm, smart_eeprom::SmartEepromMode}, pac::Peripherals
+    clock::v2::{clock_system_at_reset, dpll::Dpll, gclk::{Gclk, GclkDiv16}, pclk::Pclk}, ehal::digital::OutputPin, nvm::{Nvm, smart_eeprom::SmartEepromMode}, pac::Peripherals
 };
-use bootloader::bl_info::{
-    CodeSectionInfo, MemoryRegion, mutate_smarteeprom_info, parse_git_sha, parse_u8,
-    region_crc,
-};
+
 use cortex_m_rt::entry;
-use diag_common::ram_info;
+use diag_common::{MemoryRegion, hal_extensions::dsu::{self, Dsu}, parse_git_sha, parse_u8, ram_info, smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info}};
 
 unsafe extern "C" {
     static mut _can_ram_addr: u8;
@@ -19,11 +16,11 @@ unsafe extern "C" {
 }
 
 pub fn can_ram_start() -> u32 {
-    (&raw mut _can_ram_addr as *mut u8).addr() as u32
+    (&raw mut _can_ram_addr).addr() as u32
 }
 
 pub fn can_ram_end() -> u32 {
-    (&raw mut _can_ram_end_addr as *mut u8).addr() as u32
+    (&raw mut _can_ram_end_addr).addr() as u32
 }
 
 pub const fn create_code_info(name: [u8; 10]) -> CodeSectionInfo {
@@ -87,7 +84,7 @@ fn main() -> ! {
         ram_info::modify_bootloader_info(|f| {
             if f.ram_failure.is_none() {
                 let len = can_ram_end()-can_ram_start();
-                if let Err(atsamd_hal::dsu::Error::RamTestFailed { addr, phase, bit }) = dsu.memory_test(can_ram_start(), len) {
+                if let Err(dsu::Error::RamTestFailed { addr, phase, bit }) = dsu.memory_test(can_ram_start(), len) {
                     f.ram_failure = Some((addr, bit, phase));
                 }       
             }
@@ -111,45 +108,47 @@ fn main() -> ! {
         });
 
         // Check smart eeprom
-        Some(bootloader::bl_info::get_smarteeprom_info(&smart_eeprom))
+        Some(get_smarteeprom_info(&smart_eeprom))
     } else {
         None
     };
-    if let Some(info) = bl_info {
-        if info.bl_flashing_pending == 0 {
-            unsafe {
-                // We have to copy the bootloader portions
-                let scratch_crc =
-                    region_crc(MemoryRegion::BootloaderScratch.range_exclusive(), &mut dsu);
-                if scratch_crc == info.crc32_bl {
-                    // Can copy (Sig. valid)
-                    let bootloader_region = MemoryRegion::Bootloader;
-                    let copy_region = MemoryRegion::BootloaderScratch;
-                    // Erase bootloader
-                    let _ = nvm.erase_flash(
-                        bootloader_region.start_addr() as *mut u32,
-                        bootloader_region.blocks_8k(),
-                    );
-                    //// Copy over the scratch area to the bootloader
-                    let _ = nvm.write_flash(
-                        bootloader_region.start_addr() as *mut u32,
-                        copy_region.start_addr() as *const u32,
-                        bootloader_region.range_exclusive().len() as u32 / 4,
-                        atsamd_hal::nvm::WriteGranularity::Page,
-                    );
-                }
-                let mut unlocked_eeprom = match nvm.smart_eeprom().unwrap() {
-                    SmartEepromMode::Locked(smart_eeprom) => smart_eeprom.unlock(),
-                    SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
-                };
-                // Set the flags so that we don't do this on next boot
-                let _ =
-                    bootloader::bl_info::mutate_smarteeprom_info(&mut unlocked_eeprom, |info| {
-                        info.bl_flashing_pending = 0xFF;
-                        info.crc32_bl =
-                            region_crc(MemoryRegion::Bootloader.range_exclusive(), &mut dsu);
-                    });
+    if let Some(info) = bl_info && info.bl_flashing_pending == 0 {
+        unsafe {
+            // We have to copy the bootloader portions
+            let scratch_crc = dsu.crc32(
+                MemoryRegion::BootloaderScratch.start_addr(),
+                MemoryRegion::BootloaderScratch.size_bytes()
+                ).unwrap_or(0xFFFF_FFFF);
+            if scratch_crc == info.crc32_bl {
+                // Can copy (Sig. valid)
+                let bootloader_region = MemoryRegion::Bootloader;
+                let copy_region = MemoryRegion::BootloaderScratch;
+                // Erase bootloader
+                let _ = nvm.erase_flash(
+                    bootloader_region.start_addr() as *mut u32,
+                    bootloader_region.blocks_8k(),
+                );
+                //// Copy over the scratch area to the bootloader
+                let _ = nvm.write_flash(
+                    bootloader_region.start_addr() as *mut u32,
+                    copy_region.start_addr() as *const u32,
+                    bootloader_region.range_exclusive().len() as u32 / 4,
+                    atsamd_hal::nvm::WriteGranularity::Page,
+                );
             }
+            let mut unlocked_eeprom = match nvm.smart_eeprom().unwrap() {
+                SmartEepromMode::Locked(smart_eeprom) => smart_eeprom.unlock(),
+                SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
+            };
+            // Set the flags so that we don't do this on next boot
+            let _ =
+                mutate_smarteeprom_info(&mut unlocked_eeprom, |info| {
+                    info.bl_flashing_pending = 0xFF;
+                    info.crc32_bl =dsu.crc32(
+                        MemoryRegion::Bootloader.start_addr(),
+                        MemoryRegion::Bootloader.size_bytes()
+                    ).unwrap_or(0xFFFF_FFFF)
+                });
         }
     }
     // Jump to bootloader

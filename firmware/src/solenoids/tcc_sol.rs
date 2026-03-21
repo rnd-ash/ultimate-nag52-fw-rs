@@ -31,12 +31,12 @@
 use core::{u16, u32};
 
 use atsamd_hal::{
-    clock::{Tcc2Tcc3Clock, Tcc4Clock},
+    clock::Tcc2Tcc3Clock,
     ehal::digital::OutputPin,
-    eic::{self, ExtInt},
+    eic::{self},
     fugit::ExtU32,
-    gpio::{AlternateF, Interrupt, Pin, PullDown, PB16, PD21},
-    pac::{port::group::evctrl::Evact0select, Mclk, Peripherals, Tcc2, Tcc3, Tcc4},
+    gpio::{AlternateF, PB16},
+    pac::{port::group::evctrl::Evact0select, Mclk, Peripherals, Tcc2, Tcc3},
     prelude::_embedded_hal_Pwm,
     pwm::{Channel, TCC3Pinout, Tcc3Pwm},
     time::Hertz,
@@ -47,9 +47,8 @@ use defmt::println;
 
 use crate::hal_extension::{
     self,
-    eic_ext::{self, EicEvGen},
-    evsys::{self, EvSysChannel, EvSysUser, Uninitialized},
-    pulse_count::{PulseCounter, Tc5PulseCounter},
+    eic_ext::{self},
+    evsys::{self, EvSysChannel, Uninitialized},
 };
 
 /// TCC channel for the PWM wave
@@ -157,11 +156,11 @@ impl TccTcc {
         // Period value dicates the max of the counter
         tcc.wave().modify(|_, w| w.wavegen().nfrq());
 
-        tcc.ctrlbset().write(|w| {
+        tcc.ctrlbclr().write(|w| {
             // Count up
-            w.dir().clear_bit();
+            w.dir().set_bit();
             // Reset on hitting period value (To 0)
-            w.oneshot().clear_bit()
+            w.oneshot().set_bit()
         });
         // Set timer divider for counting
         tcc.ctrla().modify(|_, w| {
@@ -272,7 +271,7 @@ impl TccSol {
         fdbk: TccFdbk,
         eic_fdbk: eic::Channel<eic::Ch11>,
         mclk: &mut Mclk,
-        evsys_channel_pulse_detect: EvSysChannel<PdChId, Uninitialized>,
+        _evsys_channel_pulse_detect: EvSysChannel<PdChId, Uninitialized>,
         evsys_channel_zener_on: EvSysChannel<ZonChId, Uninitialized>,
         evsys_channel_zener_off: EvSysChannel<ZoffChId, Uninitialized>,
     ) -> Self {
@@ -290,7 +289,7 @@ impl TccSol {
         );
 
         // Setup the EIC trigger
-        let ext = eic_ext::EicEvGen::new(fdbk.into_pull_down_interrupt(), eic_fdbk);
+        let _ext = eic_ext::EicEvGen::new(fdbk.into_pull_down_interrupt(), eic_fdbk);
 
         Self {
             tcc_pwm,

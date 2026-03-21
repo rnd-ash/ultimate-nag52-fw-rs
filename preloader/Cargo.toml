@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 atsamd-hal = { workspace = true }
 bsp = { path = "../bsp" }
-bootloader = { path = "../bootloader", features = ["lib"] }
 cortex-m-rt.workspace = true
 cortex-m = { workspace = true, features = ["inline-asm"] }
 diag_common = { path = "../diag_common", features = ["mcu"] }

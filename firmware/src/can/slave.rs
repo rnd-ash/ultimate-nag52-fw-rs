@@ -4,7 +4,7 @@ use mcan::tx_buffers::DynTx;
 
 pub use super::data::slave_mode::*;
 use crate::{
-    can::{CanLayer, RxFrame},
+    can::{CanFilter, CanLayer, RxFrame},
     handle_frames, rxframe_default,
 };
 
@@ -29,6 +29,10 @@ impl SlaveCan {
         s
     }
 }
+
+const SLAVE_FILTERS: &[CanFilter] =         &[
+    CanFilter::new_1_id(SolenoidControl::CAN_ID)
+];
 
 impl CanLayer<FullReport, SolenoidControl> for SlaveCan {
     fn transmit(
@@ -55,5 +59,9 @@ impl CanLayer<FullReport, SolenoidControl> for SlaveCan {
 
     fn on_frame(&mut self, id: mcan::embedded_can::Id, data: &[u8; 8]) {
         handle_frames!(self, id, data, (sol_ctrl, SolenoidControl),);
+    }
+
+    fn filters(&self) -> &[super::CanFilter] {
+        SLAVE_FILTERS
     }
 }

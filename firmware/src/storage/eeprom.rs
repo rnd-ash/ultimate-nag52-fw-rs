@@ -28,8 +28,9 @@
 
 use arbitrary_int::{u7, u9};
 use atsamd_hal::{
-    dmac, dsu::{self, Dsu}, ehal_async::i2c::I2c, fugit::ExtU64, rtic_time::Monotonic, sercom::i2c::{self, I2cFutureDma}
+    dmac, ehal_async::i2c::I2c, fugit::ExtU64, rtic_time::Monotonic, sercom::i2c::{self, I2cFutureDma}
 };
+use diag_common::hal_extensions::dsu::Dsu;
 use bsp::EepromPads;
 use defmt::println;
 use diag_common::embedded_crc32c;
@@ -121,7 +122,7 @@ impl<C: dmac::ChId> Eeprom<C> {
     async fn read_block(&mut self, id: u16) -> Option<EepromBlock> {
         let addr = id.to_be_bytes();
         let mut read_buf = [0; 64];
-        let res = self
+        let _res = self
             .i2c
             .write_read(EEPROM_I2C_ADDR, &addr, &mut read_buf)
             .await

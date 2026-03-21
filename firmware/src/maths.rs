@@ -1,6 +1,5 @@
-use core::marker::PhantomData;
 
-use num_traits::{AsPrimitive, Num, NumCast};
+use num_traits::Num;
 
 pub fn interp(raw: i32, tab: &[(i32, i32)]) -> i32 {
     if raw <= tab.first().unwrap().0 {
@@ -27,6 +26,6 @@ pub fn interp_int(raw: i32, out_min: i32, out_max: i32, in_min: i32, in_max: i32
     (((out_max - out_min) * (clamped - in_min)) / (in_max - in_min)) + out_min
 }
 
-pub fn first_order_filter_in_place<T: Num>(samples: u32, new_value: T, previous_val: &mut T) {
+pub fn first_order_filter_in_place<T: Num>(_samples: u32, _new_value: T, _previous_val: &mut T) {
     
 }

@@ -240,7 +240,7 @@ fn read(
     if fast_mode {
         server.send_byte_array_with_response(&[
             KwpCommand::StartDiagnosticSession.into(),
-            KwpSessionType::ExtendedDiagnostics.into(),
+            KwpSessionType::Reprogramming.into(),
             0,
             0,
         ], None)?;

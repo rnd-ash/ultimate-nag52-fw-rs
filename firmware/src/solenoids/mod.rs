@@ -5,7 +5,6 @@ use atsamd_hal::{
     time::Hertz,
 };
 use bsp::PowerEnSol;
-use defmt::println;
 
 use crate::{
     solenoids::{

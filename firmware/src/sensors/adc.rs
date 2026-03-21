@@ -27,15 +27,13 @@ pub struct Adc0Result {
     pub core_mv: u16,
     /// IO voltage in mV
     pub io_mv: u16,
-    /// CPU Temp in 1/10th C
-    pub t_cpu: i16,
 }
 
 impl Adc0Pins {
     pub async fn poll_all(
         &mut self,
         adc0: &mut FutureAdc<Adc0, Adc0Irqs>,
-        supc: &mut Supc,
+        _supc: &mut Supc,
     ) -> Adc0Result {
         Adc0Result {
             tsen_tle82423: adc0.read(&mut self.tsen_tl8242).await,
@@ -46,7 +44,6 @@ impl Adc0Pins {
             io_mv: adc0
                 .read_cpu_voltage(atsamd_hal::adc::CpuVoltageSource::Io)
                 .await,
-            t_cpu: (adc0.read_cpu_temperature(supc).await * 10.0) as i16,
         }
     }
 }

@@ -8,7 +8,7 @@ use vergen::Emitter;
 use vergen_git2::Git2Builder;
 use std::fmt::Write as _;
 
-const MEM_F_NAME: &'static str = "../memory_full.x";
+const MEM_F_NAME: &str = "../memory_full.x";
 
 fn main() {
     let mem_x =  std::fs::read_to_string(MEM_F_NAME).unwrap();

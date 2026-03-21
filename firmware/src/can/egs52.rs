@@ -1,6 +1,6 @@
 use atsamd_hal::clock::v2::pclk;
 use bsp::can_deps::Capacities;
-use mcan::{message::Raw, tx_buffers::DynTx};
+use mcan::tx_buffers::DynTx;
 
 pub use super::data::egs_52::*;
 use crate::{
@@ -53,14 +53,14 @@ impl CanLayer<CanTxSignals, CanRxSignals> for Egs52Can {
         Ok(())
     }
 
-    fn read_signals(&self, dest: &mut CanRxSignals) {
+    fn read_signals(&self, _dest: &mut CanRxSignals) {
         if let Some(ewm230) = self.ewm_230.get(1000) {
-            let whc = ewm230.whc();
+            let _whc = ewm230.whc();
             //defmt::info!("Valid ewm230: {}  {:?}", ewm230, whc);
         }
     }
 
-    fn write_signals(&mut self, sigs: &CanTxSignals) {
+    fn write_signals(&mut self, _sigs: &CanTxSignals) {
         // Finally, calculate parity and counters
         self.gs218.set_mtgl_egs(!self.gs218.mtgl_egs());
         //self.gs218.set_mpar_egs();
