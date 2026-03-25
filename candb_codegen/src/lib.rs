@@ -4,39 +4,34 @@ use convert_case::{Case, Casing};
 
 use crate::code_gen::CodeGenerator;
 
-pub (crate) mod parser;
-pub (crate) mod code_gen;
+pub(crate) mod code_gen;
+pub(crate) mod parser;
 
-pub fn codegen_all_dbs(dir_in: PathBuf, dir_out: PathBuf) {
-    for path in dir_in.read_dir().unwrap() {
-        let p = path.unwrap();
-        let f_ty = p.file_type().unwrap();
-        if f_ty.is_file() {
-            // File
-            let f_name = p.file_name().into_string().unwrap();
-            if f_name.ends_with("txt") {
-                // Can data file
-                let can_name = f_name.split(".").next().unwrap().to_case(Case::Snake);
-                let mut out_dir = dir_out.clone();
-                out_dir.push(&can_name);
+pub fn codegen_db(f_in: impl Into<PathBuf>, dir_out: impl Into<PathBuf>) {
+    let f_in_pb = f_in.into();
+    let dir_out_pb = dir_out.into();
+    if f_in_pb.is_file() {
+        // File
+        let f_name = f_in_pb.file_name().unwrap().to_str().unwrap();
+        if f_name.ends_with("txt") {
+            // Can data file
+            let can_name = dir_out_pb
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
 
-                std::fs::create_dir_all(&out_dir).unwrap();
-                for file in out_dir.read_dir().unwrap() {
-                    std::fs::remove_file(file.unwrap().path()).unwrap()
-                }
+            std::fs::create_dir_all(&dir_out_pb).unwrap();
 
-                let in_file = fs::read(p.path()).unwrap();
-                let s = String::from_utf8(in_file).unwrap();
-                let mut candb_parser = parser::CanDbParser::default();
-                candb_parser.parse_file(s);
-                let code_generator = CodeGenerator::new(candb_parser.ecus, out_dir);
-                code_generator.code_gen(&can_name).unwrap();
-
-
-            } else {
-                panic!("Not a CAN database")
-            }
-
+            let in_file = fs::read(f_in_pb).unwrap();
+            let s = String::from_utf8(in_file).unwrap();
+            let mut candb_parser = parser::CanDbParser::default();
+            candb_parser.parse_file(s);
+            let code_generator = CodeGenerator::new(candb_parser.ecus, dir_out_pb);
+            code_generator.code_gen(&can_name).unwrap();
+        } else {
+            panic!("Not a CAN database")
         }
     }
 }
