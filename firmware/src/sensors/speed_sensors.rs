@@ -1,7 +1,7 @@
 //! # Speed sensor module
 //!
 //! The TCU has multiple inputs that require continuous pulse counting. These are mainly
-//! for speed sensors within or outside of the gearbox.
+//! for speed sensors within or outside the gearbox.
 //!
 //! Each speed sensor signal requires multiple peripherals to function together in order
 //! to count pulses without any CPU intervension. The mapping of signals to peripherals is
@@ -155,7 +155,7 @@ pub fn init_speed_sensor<
     tc_clock: &Pclk<TC::ClockId, PS>,
 ) -> PulseCounter<TC, EvsysId, EicEvGen<P, EicId>> {
     let mut eic_wrapper = eic_ext::EicEvGen::new(pin.into(), eic_channel);
-    eic_wrapper.enable_interrupt();
+    //eic_wrapper.enable_interrupt();
     eic_wrapper.sense(Sense::High);
 
     let evsys_channel_ready = eic_wrapper.enable_evsys(evsys_channel);

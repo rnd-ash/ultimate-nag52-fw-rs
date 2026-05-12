@@ -65,7 +65,7 @@ pub mod usb;
 pub static ST_MIN_EGS: AtomicU8 = AtomicU8::new(0x02);
 pub static BS_EGS: AtomicU8 = AtomicU8::new(0x08);
 
-pub const fn create_code_info(name: [u8; 10]) -> CodeSectionInfo {
+pub const fn create_code_info(name: [u8; 20]) -> CodeSectionInfo {
     CodeSectionInfo {
         name,
         git_sha: parse_git_sha(env!("VERGEN_GIT_SHA")),
@@ -121,20 +121,17 @@ atsamd_hal::rtc_monotonic!(Mono, rtc_clock::Clock32k);
 
 #[rtic::app(device = atsamd_hal::pac, dispatchers = [DAC_EMPTY_0])]
 mod app {
-    use atsamd_hal::{
-        clock::v2::types::Can0,
-        dsu::Dsu,
-        gpio::{PD12},
-    };
+    use atsamd_hal::{clock::v2::types::Can0, dsu::Dsu, gpio::PD12};
     use automotive_diag::kwp2000::KwpSessionType;
     use bsp::can_deps::CAN_TX_MAILBOX_DIAG;
     use diag_common::{
-        BootloaderStayReason,
+        BootloaderStayReason, hal_extensions,
         isotp_endpoints::{
             SharedIsoTpBuf,
             can_isotp::{IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg, make_isotp_endpoint},
             usb_isotp::{UsbIsoTpConsumer, new_usb_isotp},
-        }, smarteeprom::mutate_smarteeprom_info,
+        },
+        smarteeprom::mutate_smarteeprom_info,
     };
     use usbd_serial::DefaultBufferStore;
 
@@ -200,8 +197,7 @@ mod app {
                     }
                 };
                 mutate_smarteeprom_info(&mut eeprom, |info| {
-                    const FW_INFO: CodeSectionInfo =
-                        create_code_info(*b"UN52PICBLD");
+                    const FW_INFO: CodeSectionInfo = create_code_info(*b"UN52 PIC32CXSG BOOT ");
                     if info.bootloader_info != FW_INFO {
                         info.bootloader_info = FW_INFO;
                     }
@@ -223,7 +219,7 @@ mod app {
             }
         };
 
-        let dsu = Dsu::new(device.dsu, &device.pac).unwrap();
+        let mut dsu = hal_extensions::dsu::Dsu::new(device.dsu, &device.pac).unwrap();
 
         #[cfg(not(feature = "stay-in-bootloader"))]
         {
@@ -239,7 +235,7 @@ mod app {
                 reset_reason = BootloaderStayReason::ProductionInfoNotSet;
             } else {
                 let mut continue_boot = true;
-                if let Some(ram_info) = get_bootloader_comm_info() {
+                if let Some(ram_info) = get_bootloader_comm_info(&mut dsu) {
                     continue_boot = false;
                     // Sanity check first to ensure both app and bootloader
                     // have the same version of the data structure
@@ -251,6 +247,7 @@ mod app {
                             BS_EGS.store(override_timing.1, Ordering::SeqCst);
                         }
                         defmt::warn!("Bootloader Diag reqest received");
+                        reset_reason = BootloaderStayReason::Diagnostics;
                     } else if ram_info.reset_counter >= MAX_RESET_COUNT {
                         // Emergency mode (User reset 5 times quickly)
                         defmt::warn!("Bootloader Reset count exceeded!");
@@ -272,7 +269,7 @@ mod app {
                 } else {
                     // Create default bootloader info if corrupt
                     defmt::warn!("Bootloader info corrupt - Creating new");
-                    create_default_comm_info();
+                    create_default_comm_info(&mut dsu);
                 }
 
                 if BootloaderStayReason::None == reset_reason && !can_app_start(&see_info) {
@@ -290,7 +287,7 @@ mod app {
                     // 2048 = 2 seconds
                     wdt.start(WatchdogTimeout::Cycles2K as u8);
 
-                    modify_bootloader_info(|state| {
+                    modify_bootloader_info(&mut dsu, |state| {
                         // Application will reset this
                         state.reset_counter += 1;
                     });
@@ -305,7 +302,7 @@ mod app {
         }
 
         // Bootloader init - Reset the bootloader state
-        create_default_comm_info();
+        create_default_comm_info(&mut dsu);
 
         // Did not jump to app, start the bootloader diagnostic system
         info!("Bootloader diag start");
@@ -454,9 +451,7 @@ mod app {
         diag_task::spawn().unwrap();
         led_task::spawn().unwrap();
         (
-            Shared {
-                usb: usb_data,
-            },
+            Shared { usb: usb_data },
             Resources {
                 tcc_led,
                 usb_isotp_thread: isotp_usb_thread,
@@ -496,7 +491,7 @@ mod app {
                     );
                     let _ = usb_isotp_thread.write(response).await;
                 },
-                _ = Mono::delay(10.millis()).fuse() => {
+                _ = Mono::delay(1.millis()).fuse() => {
                     // Fallthrough so we update KWP server
                 }
             }

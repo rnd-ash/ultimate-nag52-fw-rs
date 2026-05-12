@@ -111,11 +111,13 @@ impl<'a, B: usb_device::bus::UsbBus, RS: BorrowMut<[u8]>, WS: BorrowMut<[u8]>, c
         if buffer.len() > N {
             return Err(());
         }
-        let size = (buffer.len() as u16).to_le_bytes();
+        let size = (buffer.len() as u16 + 1).to_le_bytes();
         let mut serial = self.serial.access().await;
         serial.write_all(&size).map_err(|_| ())?;
+        serial
+            .write_all(&[crate::USB_PACKET_TY_ISOTP])
+            .map_err(|_| ())?;
         serial.write_all(buffer).map_err(|_| ())?;
         Ok(())
     }
 }
-

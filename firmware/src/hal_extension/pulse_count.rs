@@ -150,14 +150,14 @@ impl<T: CounterInstance, EvId: super::evsys::ChId, EvSrc: EvSysGenerator>
 
             // Enable reading off the EVSYS channel
             instance.evctrl().write(|w| {
-                w.tcei().set_bit(); // Enable incomming events
+                w.tcei().set_bit(); // Enable incoming events
                 w.evact().variant(Evactselect::Count) // Count up on event
             });
             instance.count().reset();
             if settings.stop_on_overflow {
                 instance.ctrlbclr().write(|w| w.oneshot().set_bit()); // Clear oneshot (Allow overflow)
             } else {
-                instance.ctrlbset().write(|w| w.oneshot().set_bit()); // Set oneshhot (Stop on overflow)
+                instance.ctrlbset().write(|w| w.oneshot().set_bit()); // Set oneshot (Stop on overflow)
             }
             while instance.syncbusy().read().bits() != 0 {}
             instance.ctrla().modify(|_, w| {
@@ -167,11 +167,10 @@ impl<T: CounterInstance, EvId: super::evsys::ChId, EvSrc: EvSysGenerator>
                 w.prescaler().div1()
             });
         }
-        let s = Self {
+        Self {
             instance: tc,
             evsys_channel: ready_channel,
-        };
-        s
+        }
     }
 
     /// Stop pulse counting and release the TC peripheral and EVSYS channel

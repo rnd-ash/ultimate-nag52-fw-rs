@@ -1,9 +1,13 @@
 use atsamd_hal::{can::Dependencies, pac};
-use mcan::{message::{rx, tx}, rx_dedicated_buffers::RxDedicatedBuffer, rx_fifo::{Fifo0, RxFifo}};
+use mcan::{
+    message::{rx, tx},
+    rx_dedicated_buffers::RxDedicatedBuffer,
+    rx_fifo::{Fifo0, RxFifo},
+};
 
 use crate::{CanRx, CanTx};
-use mcan::generic_array::typenum::{*};
 use atsamd_hal::clock::v2::types::Can0;
+use mcan::generic_array::typenum::*;
 pub struct Capacities;
 
 // rx::Message<8> since EGS does not deal with CANFD (So max 8 byte message)
@@ -21,8 +25,8 @@ impl mcan::messageram::Capacities for Capacities {
     type TxMessage = tx::Message<8>;
     // Maximum size of any EGS CAN layer is 6 CAN Frames outputted (+1 for diag)
     // We can therefore optimize RAM better by having only 10 Tx msgs
-    type TxBuffers = U10;  // Up to 10 messages to Tx...
-    // ...of which 7 frames have their own dedicated 'slots'
+    type TxBuffers = U32; // Up to 10 messages to Tx...
+                          // ...of which 7 frames have their own dedicated 'slots'
     type DedicatedTxBuffers = U7;
     type TxEventFifo = U8;
 }
@@ -36,15 +40,12 @@ pub const CAN_RX_MAILBOX_DIAG: usize = 0;
 pub type RxFifo0 =
     RxFifo<'static, Fifo0, Can0, <Capacities as mcan::messageram::Capacities>::RxFifo0Message>;
 
-pub type RxDedicated = 
+pub type RxDedicated =
     RxDedicatedBuffer<'static, Can0, <Capacities as mcan::messageram::Capacities>::RxFifo0Message>;
 
 pub type Can0Tx = mcan::tx_buffers::Tx<'static, Can0, Capacities>;
 
 pub type Can0TxEventFifo = mcan::tx_event_fifo::TxEventFifo<'static, Can0>;
 
-pub type Can0Aux<GclkId> = mcan::bus::Aux<
-    'static,
-    Can0,
-    Dependencies<Can0, GclkId, CanRx, CanTx, pac::Can0>,
->;
+pub type Can0Aux<GclkId> =
+    mcan::bus::Aux<'static, Can0, Dependencies<Can0, GclkId, CanRx, CanTx, pac::Can0>>;

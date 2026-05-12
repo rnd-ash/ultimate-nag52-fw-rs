@@ -1,8 +1,7 @@
 use crate::{Mono, app};
-use app::diag_task::LocalResources as LocalResources;
+use app::diag_task::LocalResources;
 use atsamd_hal::{fugit::ExtU64, rtic_time::Monotonic};
 use futures::FutureExt;
-
 
 pub async fn diag_task(ctx: app::diag_task::Context<'_>) {
     let LocalResources {
@@ -21,7 +20,7 @@ pub async fn diag_task(ctx: app::diag_task::Context<'_>) {
                 let response = diag_server.process_cmd(
                     buf.payload(),
                     Mono::now().duration_since_epoch().to_millis(),
-                );
+                ).await;
                 let _ = isotp_thread.write_payload(&mut Mono, response).await;
             },
             buf = usb_isotp_thread.read().fuse() => {
@@ -29,7 +28,7 @@ pub async fn diag_task(ctx: app::diag_task::Context<'_>) {
                 let response = diag_server.process_cmd(
                     buf.payload(),
                     Mono::now().duration_since_epoch().to_millis(),
-                );
+                ).await;
                 let _ = usb_isotp_thread.write(response).await;
             },
             _ = Mono::delay_until(deadline).fuse() => {

@@ -3,9 +3,6 @@
 use core::ops::Range;
 
 #[cfg(feature = "mcu")]
-pub use embedded_crc32c;
-
-#[cfg(feature = "mcu")]
 pub mod isotp_endpoints;
 
 #[cfg(feature = "mcu")]
@@ -18,6 +15,20 @@ pub mod dyn_panic;
 
 #[cfg(feature = "mcu")]
 pub mod ram_info;
+
+#[cfg(feature = "mcu")]
+pub mod defmt_multi_output;
+
+#[derive(Debug, Clone, Copy)]
+pub enum DefmtTarget {
+    Rtt = 0, // Default (Always available)
+    Can = 1,
+    Serial = 2,
+}
+
+pub const CAN_ID_DEFMT_LOG: u16 = 0x500; // Reserved on ALL CAN Layers
+pub const USB_PACKET_TY_ISOTP: u8 = 0xFF;
+pub const USB_PACKET_TY_DEFMT: u8 = 0xFE;
 
 pub const fn parse_u8(s: &str) -> u8 {
     let mut p = konst::Parser::new(s);
@@ -45,6 +56,7 @@ pub enum BootloaderStayReason {
     AppInvalid = 5,
     ProductionInfoNotSet = 6,
     RamFailure = 7,
+    Diagnostics = 8,
     Unkown,
 }
 
@@ -58,6 +70,8 @@ impl From<u8> for BootloaderStayReason {
             4 => Self::MagicPin,
             5 => Self::AppInvalid,
             6 => Self::ProductionInfoNotSet,
+            7 => Self::RamFailure,
+            8 => Self::Diagnostics,
             _ => Self::Unkown,
         }
     }
@@ -66,7 +80,7 @@ impl From<u8> for BootloaderStayReason {
 pub struct KwpPanicInfo {}
 
 const KB: u32 = 1024;
-const SECTOR_SIZE: u32 = 8*KB;
+const SECTOR_SIZE: u32 = 8 * KB;
 const PRELOADER_ADDR_RANGE: Range<u32> = 0..(8 * KB);
 const BOOTLOADER_ADDR_RANGE: Range<u32> = (8 * KB)..(120 * KB);
 const BOOTLOADER_SCRATCH_ADDR_RANGE: Range<u32> = (120 * KB)..(240 * KB);
@@ -99,7 +113,7 @@ impl MemoryRegion {
     }
 
     pub const fn size_bytes(&self) -> u32 {
-        self.blocks_8k()*SECTOR_SIZE
+        self.blocks_8k() * SECTOR_SIZE
     }
 }
 

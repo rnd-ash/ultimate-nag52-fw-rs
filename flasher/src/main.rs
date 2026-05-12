@@ -7,33 +7,41 @@ use std::{
 };
 
 use chrono::{Datelike, Utc};
-use clap::{*};
+use clap::*;
 use clap_num::maybe_hex;
 use color_eyre::{
     eyre::{Report, Result},
     owo_colors::OwoColorize,
 };
 use console::style;
-use diag_common::BootloaderStayReason;
+use defmt_decoder::log::{DefmtLoggerType, format::{Formatter, FormatterConfig, HostFormatter}};
+use defmt_parser::Level;
+use diag_common::{BootloaderStayReason, CAN_ID_DEFMT_LOG, smarteeprom::CodeSectionInfo};
 use ecu_diagnostics::{
-    channel::{IsoTPChannel, IsoTPSettings},
+    DiagError,
+    channel::{IsoTPChannel, IsoTPSettings, Packet, PayloadChannel},
     dynamic_diag::{
         DiagServerBasicOptions, DiagServerEmptyLogger, DynamicDiagSession, TimeoutConfig,
     },
     hardware::{Hardware, HardwareScanner},
     kwp2000::{Kwp2000Protocol, KwpCommand, KwpError, KwpSessionType},
-    DiagError,
 };
-use elf::{
-    abi::PT_LOAD,
+use elf::abi::PT_LOAD;
+use indicatif::{
+    FormattedDuration, HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle,
 };
-use indicatif::{HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 use object::{
-    Endianness, Object, ObjectSection, SectionKind, elf::FileHeader32, read::elf::{FileHeader, ProgramHeader}
+    Endianness, Object, ObjectSection, ObjectSymbol, SectionKind,
+    elf::FileHeader32,
+    read::elf::{FileHeader, ProgramHeader},
 };
 
-use crate::usb_diag_compat::UsbDiagIface;
+use crate::{
+    defmt::{DefmtCanIf, DefmtLogEndpoint, MicrosFormattedDuration},
+    usb_diag_compat::UsbDiagIface,
+};
 
+mod defmt;
 mod usb_diag_compat;
 
 const DSU_CRC32_SEED: u32 = 0xEDB88320;
@@ -66,8 +74,10 @@ pub enum Command {
     Flash {
         #[clap(long, short)]
         bootloader: Option<PathBuf>,
-        #[clap(long, short)]
+        #[clap(long)]
         application: PathBuf,
+        #[clap(short)]
+        log: bool,
     },
     /// Read / Dump memory from the TCU to a binary file
     Read {
@@ -148,7 +158,11 @@ fn launch_server_usb(mp: &mut MultiProgress) -> Result<DynamicDiagSession, Repor
     Ok(server)
 }
 
-fn create_server(fast_mode: &mut bool, args: &Flasher, mp: &mut MultiProgress) -> Result<DynamicDiagSession, Report> {
+fn create_server(
+    fast_mode: &mut bool,
+    args: &Flasher,
+    mp: &mut MultiProgress,
+) -> Result<DynamicDiagSession, Report> {
     #[cfg(target_os = "linux")]
     let server = match args.interface {
         Interface::Usb => launch_server_usb(mp),
@@ -194,14 +208,14 @@ fn launch_server_isotp(can_iface_name: &str, fast: bool) -> Result<DynamicDiagSe
     channel.set_ids(0x07E1, 0x07E9)?;
     channel.open()?;
 
-    let server = DynamicDiagSession::new(
+    let mut server = DynamicDiagSession::new(
         Kwp2000Protocol::default(),
         channel,
         EGS_DIAG_SETTINGS,
         Some(adv_opts),
         DiagServerEmptyLogger {},
     )?;
-
+    server.set_retry_count(5);
     Ok(server)
 }
 
@@ -238,12 +252,15 @@ fn read(
     spinner.set_message("Enter extended mode");
     // Now start the command chain
     if fast_mode {
-        server.send_byte_array_with_response(&[
-            KwpCommand::StartDiagnosticSession.into(),
-            KwpSessionType::Reprogramming.into(),
-            0,
-            0,
-        ], None)?;
+        server.send_byte_array_with_response(
+            &[
+                KwpCommand::StartDiagnosticSession.into(),
+                KwpSessionType::Reprogramming.into(),
+                0,
+                0,
+            ],
+            None,
+        )?;
     } else {
         server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
     }
@@ -293,8 +310,12 @@ fn analyze(file: &PathBuf, flash_max: u64) -> Result<(), Report> {
     let mut flash_bytes: usize = 0;
     let mut ram_bytes: usize = 0;
     let mut high_ram_watermark: u32 = 0;
+    let mut defmt_size: u64 = get_defmt_bytes(file).len() as u64;
     for section in elf.sections() {
-        if section.kind() == SectionKind::Other || section.kind() == SectionKind::Metadata || section.kind() == SectionKind::OtherString {
+        if section.kind() == SectionKind::Other
+            || section.kind() == SectionKind::Metadata
+            || section.kind() == SectionKind::OtherString
+        {
             continue;
         }
         if section.address() < 0x100000 {
@@ -306,25 +327,42 @@ fn analyze(file: &PathBuf, flash_max: u64) -> Result<(), Report> {
             let max = (section.size() + section.address()) as u32;
             high_ram_watermark = high_ram_watermark.max(max);
         }
-        
     }
     let ram_alloc = high_ram_watermark - 0x20000000;
-    let pb_flash = ProgressBar::new(flash_max)
-        .with_style(ProgressStyle::with_template("Flash usage: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})")
+    let pb_flash = ProgressBar::new(flash_max).with_style(
+        ProgressStyle::with_template(
+            "Flash usage: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})",
+        )
         .unwrap()
-        .progress_chars("##-"));
+        .progress_chars("##-"),
+    );
     pb_flash.set_position(flash_bytes as u64);
     pb_flash.abandon();
-    let pb_ram = ProgressBar::new(256*1024)
-        .with_style(ProgressStyle::with_template("  RAM usage: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})")
+    let pb_qspi = ProgressBar::new(1024 * 256).with_style(
+        ProgressStyle::with_template(
+            " QSPI usage: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})",
+        )
         .unwrap()
-        .progress_chars("##-"));
+        .progress_chars("##-"),
+    );
+    pb_qspi.set_position(defmt_size as u64);
+    pb_qspi.abandon();
+    let pb_ram = ProgressBar::new(256 * 1024).with_style(
+        ProgressStyle::with_template(
+            "  RAM usage: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})",
+        )
+        .unwrap()
+        .progress_chars("##-"),
+    );
     pb_ram.set_position(ram_bytes as u64);
     pb_ram.abandon();
-    let pb_ram_watermark = ProgressBar::new(256*1024)
-        .with_style(ProgressStyle::with_template("  RAM alloc: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})")
+    let pb_ram_watermark = ProgressBar::new(256 * 1024).with_style(
+        ProgressStyle::with_template(
+            "  RAM alloc: [{bar:40.cyan/blue}] {percent}% ({decimal_bytes}/{total_bytes})",
+        )
         .unwrap()
-        .progress_chars("##-"));
+        .progress_chars("##-"),
+    );
     pb_ram_watermark.set_position(ram_alloc as u64);
     pb_ram_watermark.abandon();
     Ok(())
@@ -335,14 +373,14 @@ fn flash(
     file: &PathBuf,
     server: &mut DynamicDiagSession,
     fast_mode: bool,
-    is_bl: bool
+    is_bl: bool,
 ) -> Result<(), Report> {
-    const PRE_END_ADDR: u64 = 1024*8;
-    const BL_END_ADDR: u64 = 1024*128;
+    const PRE_END_ADDR: u64 = 1024 * 8;
+    const BL_END_ADDR: u64 = 1024 * 128;
     let max_size = if is_bl {
-        BL_END_ADDR-PRE_END_ADDR
+        BL_END_ADDR - PRE_END_ADDR
     } else {
-        (1024*1024)-BL_END_ADDR
+        (1024 * 1024) - BL_END_ADDR
     };
     analyze(file, max_size)?;
     let binary_bytes = fs::read(file)?;
@@ -394,12 +432,15 @@ fn flash(
     spinner.set_message("Enter programming mode");
     // Now start the command chain
     if fast_mode {
-        server.send_byte_array_with_response(&[
-            KwpCommand::StartDiagnosticSession.into(),
-            KwpSessionType::Reprogramming.into(),
-            0,
-            0,
-        ], None)?;
+        server.send_byte_array_with_response(
+            &[
+                KwpCommand::StartDiagnosticSession.into(),
+                KwpSessionType::Reprogramming.into(),
+                0,
+                0,
+            ],
+            None,
+        )?;
     } else {
         server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
     }
@@ -419,10 +460,13 @@ fn flash(
     server.send_byte_array_with_response(&erase_cmd, None)?;
     let mut e_counter = 0;
     loop {
-        match server.send_byte_array_with_response(&[
-            KwpCommand::RequestRoutineResultsByLocalIdentifier.into(),
-            0xE0,
-        ], None) {
+        match server.send_byte_array_with_response(
+            &[
+                KwpCommand::RequestRoutineResultsByLocalIdentifier.into(),
+                0xE0,
+            ],
+            None,
+        ) {
             Ok(res) => {
                 if res[2] == 0x00 {
                     break;
@@ -442,12 +486,15 @@ fn flash(
                 e_counter += 1;
                 // Can happen after reboot
                 if fast_mode {
-                    server.send_byte_array_with_response(&[
-                        KwpCommand::StartDiagnosticSession.into(),
-                        KwpSessionType::Reprogramming.into(),
-                        0,
-                        0,
-                    ], None)?;
+                    server.send_byte_array_with_response(
+                        &[
+                            KwpCommand::StartDiagnosticSession.into(),
+                            KwpSessionType::Reprogramming.into(),
+                            0,
+                            0,
+                        ],
+                        None,
+                    )?;
                 } else {
                     server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
                 }
@@ -579,20 +626,26 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
                 BootloaderStayReason::Panic => style("Application panicked (See below)").red(),
                 BootloaderStayReason::RamFailure => style("RAM Test failure").red(),
                 BootloaderStayReason::MagicPin => style("Magic pin held high").green(),
-                BootloaderStayReason::ProductionInfoNotSet => style("Board production info not burned").yellow(),
+                BootloaderStayReason::ProductionInfoNotSet => {
+                    style("Board production info not burned").yellow()
+                }
                 BootloaderStayReason::AppInvalid => {
                     style("Application invalid or flashing not completed").yellow()
                 }
                 BootloaderStayReason::Unkown => style("Unknown").red(),
+                BootloaderStayReason::Diagnostics => style("Diagnostics").green(),
             };
             map.insert("In Bootloader reason", Some(format!("{}", txt)));
 
             if BootloaderStayReason::from(res[2]) == BootloaderStayReason::Panic {
-                if let Ok(panic_msg_res) = server.send_byte_array_with_response(&[0x21, 0xE3], None) {
+                if let Ok(panic_msg_res) = server.send_byte_array_with_response(&[0x21, 0xE3], None)
+                {
                     let msg = String::from_utf8_lossy(&panic_msg_res[2..]);
                     panic_msg = Some(msg.to_string());
                 }
-                if let Ok(location_msg_res) = server.send_byte_array_with_response(&[0x21, 0xE4], None) {
+                if let Ok(location_msg_res) =
+                    server.send_byte_array_with_response(&[0x21, 0xE4], None)
+                {
                     let column = u32::from_le_bytes(location_msg_res[2..6].try_into().unwrap());
                     let line = u32::from_le_bytes(location_msg_res[6..10].try_into().unwrap());
                     let file = String::from_utf8_lossy(&location_msg_res[10..]);
@@ -645,103 +698,123 @@ fn ident(server: DynamicDiagSession) -> Result<(), Report> {
         if let Ok(ident) = server.send_byte_array_with_response(&[0x1A, 0x8A], None) {
             println!(
                 "\n{}",
-                style("Software detailed information").bold().bright_purple()
+                style("Software detailed information")
+                    .bold()
+                    .bright_purple()
             );
 
-            const FW_BLK_SIZE: usize = 33;
-            let mut blk = 0usize;
-            for (idx, cat) in ["Preloader block", "Bootloader block", "Application block"].iter().enumerate() {
-                let slice = &ident[2+(blk*FW_BLK_SIZE)..2+(FW_BLK_SIZE*(blk+1))];
-                let s = if slice.contains(&0xFF) {
-                    // Blank
-                    style("Not flashed").bold().red()
-                } else {
+            let mut offset = 2;
+            for (idx, cat) in ["Preloader block", "Bootloader block", "Application block"]
+                .iter()
+                .enumerate()
+            {
+                let blob = ident[offset..offset + std::mem::size_of::<CodeSectionInfo>()].as_ptr()
+                    as *const u8;
+                let cast = blob as *const CodeSectionInfo;
+                let code_sec = unsafe { cast.as_ref().unwrap() };
+                offset += std::mem::size_of::<CodeSectionInfo>();
+                let flashed = !code_sec.name.contains(&0xFF);
+                let s = if flashed {
                     style("Present").bold().green()
+                } else {
+                    style("Not flashed").bold().red()
                 };
                 let (wall, arrow) = if idx == 2 {
                     (" ", "└─")
                 } else {
                     ("│", "├─")
                 };
+                println!("{arrow}{}: {}", style(cat).bold(), s);
+                if !flashed {
+                    continue;
+                }
+                // Print information
+                const PADDING: usize = 20;
+                let name = String::from_utf8_lossy(&code_sec.name);
+                let sha = String::from_utf8_lossy(&code_sec.git_sha);
+
                 println!(
-                    "{arrow}{}: {}",
-                    style(cat).bold(),
-                    s
+                    "{wall} ├─{: <PADDING$}: {}",
+                    style("Identified name").bold().dim(),
+                    style(name).green().dim(),
                 );
 
-                const PADDING: usize = 16;
-                if !slice.contains(&0xFF) {
-                    // Print information
-                    let name = String::from_utf8_lossy(&slice[0..10]);
-                    let sha = String::from_utf8_lossy(&slice[10..22]);
+                println!(
+                    "{wall} ├─{: <PADDING$}: {}",
+                    style("Git SHA").bold().dim(),
+                    style(sha).green().dim(),
+                );
 
-                    println!(
-                        "{wall} ├─{: <PADDING$}: {}",
-                        style("Identified name").bold().dim(),
-                        style(name).green().dim(),
-                    );
+                println!(
+                    "{wall} ├─{: <PADDING$}: {}",
+                    style("Version").bold().dim(),
+                    style(format!(
+                        "{}.{}.{}",
+                        code_sec.version_major, code_sec.version_minor, code_sec.version_patch
+                    ))
+                    .green()
+                    .dim(),
+                );
 
-                    println!(
-                        "{wall} ├─{: <PADDING$}: {}",
-                        style("Git SHA").bold().dim(),
-                        style(sha).green().dim(),
-                    );
-                    
-                    println!(
-                        "{wall} ├─{: <PADDING$}: {}",
-                        style("Version").bold().dim(),
-                        style(format!("{}.{}.{}", slice[22], slice[23], slice[24])).green().dim(),
-                    );
+                println!(
+                    "{wall} ├─{: <PADDING$}: {}",
+                    style("Rustc version").bold().dim(),
+                    style(format!(
+                        "{}.{}.{}",
+                        code_sec.rustc_version_major,
+                        code_sec.rustc_version_minor,
+                        code_sec.rustc_version_patch
+                    ))
+                    .green()
+                    .dim(),
+                );
 
-                    println!(
-                        "{wall} ├─{: <PADDING$}: {}",
-                        style("Rustc version").bold().dim(),
-                        style(format!("{}.{}.{}", slice[25], slice[26], slice[27])).green().dim(),
-                    );
+                println!(
+                    "{wall} ├─{: <PADDING$}: {}",
+                    style("Compile date").bold().dim(),
+                    style(format!(
+                        "{}/{}/20{:02} (Week {})",
+                        code_sec.compile_day,
+                        code_sec.compile_month,
+                        code_sec.compile_year,
+                        code_sec.compile_month
+                    ))
+                    .green()
+                    .dim(),
+                );
 
-                    println!(
-                        "{wall} ├─{: <PADDING$}: {}",
-                        style("Compile date").bold().dim(),
-                        style(format!("{}/{}/20{:02} (Week {})", slice[31], slice[29], slice[28], slice[30])).green().dim(),
-                    );
+                let dbg_txt = if code_sec.is_debug == 0 {
+                    style("No").green().dim()
+                } else {
+                    style("Yes").yellow().dim()
+                };
 
-                    let dbg_txt = if slice[32] == 0x00 {
-                       style("No").green().dim()
+                if idx > 0 {
+                    // Grab CRC too
+                    let start = 101 + ((idx - 1) * 4);
+                    let crc = u32::from_le_bytes(ident[start..start + 4].try_into().unwrap());
+                    let crc_txt = if crc == 0xFFFF_FFFF || crc == 0 {
+                        // Debug flash
+                        style("Not present - Flashed via debugger".to_string())
+                            .yellow()
+                            .dim()
                     } else {
-                       style("Yes").yellow().dim()
+                        style(format!("0x{:08X}", crc)).green().dim()
                     };
-
-                    if idx > 0 {
-                        // Grab CRC too
-                        let start = 101+((idx-1)*4);
-                        let crc = u32::from_le_bytes(ident[start..start+4].try_into().unwrap());
-                        let crc_txt = if crc == 0xFFFF_FFFF || crc == 0 {
-                            // Debug flash
-                            style("Not present - Flashed via debugger".to_string()).yellow().dim()
-                        } else {
-                            style(format!("0x{:08X}", crc)).green().dim()
-                        };
-                        println!(
-                            "{wall} ├─{: <PADDING$}: {crc_txt}",
-                            style("Fingerprint").bold().dim()
-                        );
-                    }
-
                     println!(
-                        "{wall} └─{: <PADDING$}: {dbg_txt}",
-                        style("Debug build").bold().dim(),
+                        "{wall} ├─{: <PADDING$}: {crc_txt}",
+                        style("Fingerprint").bold().dim()
                     );
-
-                    if idx != 2 {
-                        println!("{wall}");
-                    }
                 }
 
+                println!(
+                    "{wall} └─{: <PADDING$}: {dbg_txt}",
+                    style("Debug build").bold().dim(),
+                );
 
-
-
-
-                blk += 1;
+                if idx != 2 {
+                    println!("{wall}");
+                }
             }
         }
     }
@@ -774,12 +847,68 @@ fn burn_date(server: DynamicDiagSession) -> Result<(), Report> {
 
 fn set_security_lock(server: DynamicDiagSession, en: bool) -> Result<(), Report> {
     server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
-    server.send_byte_array_with_response(&[
-        KwpCommand::StartRoutineByLocalIdentifier.into(),
-        0xFE,
-        en as u8,
-    ], None)?;
+    server.send_byte_array_with_response(
+        &[
+            KwpCommand::StartRoutineByLocalIdentifier.into(),
+            0xFE,
+            en as u8,
+        ],
+        None,
+    )?;
     Ok(())
+}
+
+fn get_defmt_bytes(path: &PathBuf) -> Vec<u8> {
+    let elf_bytes = fs::read(path).unwrap();
+    let tab = defmt_decoder::Table::parse(&elf_bytes).ok().flatten();
+    if let Some(table) = tab {
+        let res = postcard::to_allocvec(&table).unwrap();
+        lz4_flex::compress(&res)
+    } else {
+        vec![]
+    }
+}
+
+fn attach_log(path: &PathBuf, ty: Interface, name: Option<String>) -> Result<(), Report> {
+    let elf_bytes = fs::read(path).unwrap();
+    let table = defmt_decoder::Table::parse(&elf_bytes)
+        .map_err(|e| Report::msg(e.to_string()))?
+        .ok_or_else(|| Report::msg(".defmt table not found"))?;
+    let locations = table.get_locations(&elf_bytes).ok();
+
+    let server: Box<dyn DefmtLogEndpoint> = match ty {
+        Interface::Usb => Box::new(UsbDiagIface::new().unwrap()),
+        Interface::Can | Interface::CanFast => {
+            let scan_iface = name.unwrap();
+            let logger = DefmtCanIf::new(&scan_iface).unwrap();
+            Box::new(logger)
+        }
+    };
+    loop {
+        while let Some(frame) = server.read_msg() {
+            if let Some(decoded) = defmt::decode_msg(&frame, &table, &locations) {
+                let level_txt = match decoded.level {
+                    Some(Level::Info) => format!("{}", "INFO".green().bold()),
+                    Some(Level::Warn) => format!("{}", "WARN".yellow().bold()),
+                    Some(Level::Error) => format!("{}", "ERROR".red().bold()),
+                    Some(Level::Trace) => format!("{}", "TRACE".bold()),
+                    Some(Level::Debug) => format!("{}", "DEBUG".bold()),
+                    None => format!("{}", "PRINT".bold()),
+                };
+
+                let ts_txt = if let Some(ts) = decoded.ts {
+                    format!("{}", MicrosFormattedDuration(ts))
+                } else {
+                    "".to_string()
+                };
+
+                println!("[{:-<10} {}] {}", level_txt, ts_txt, decoded.msg)
+            } else {
+                println!("Decode err: {frame:02X?}")
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn main() -> Result<()> {
@@ -788,8 +917,9 @@ fn main() -> Result<()> {
     let start_timer = Instant::now();
     let args = Flasher::parse();
 
-    if let Command::Analyze { file } = &args.command {
-        analyze(&file, 1024*1024)?;
+    if let Command::Analyze { file } = args.command.clone() {
+        analyze(&file, 1024 * 1024)?;
+        attach_log(&file, args.interface, args.can_iface);
         return Ok(());
     }
 
@@ -800,6 +930,7 @@ fn main() -> Result<()> {
         Command::Flash {
             bootloader,
             application,
+            log,
         } => {
             let has_bootloader = bootloader.is_some();
             if let Some(loader) = bootloader {
@@ -823,9 +954,22 @@ fn main() -> Result<()> {
             } else {
                 println!("{}", style("Flashing application").bold().green());
             }
-            
-            flash(&mp, application, &mut server, fast_mode, false)
+
+            flash(&mp, application, &mut server, fast_mode, false)?;
+            if *log {
+                // Switch to log mode
+                let log_mode = match args.interface {
+                    Interface::Usb => 2,
+                    Interface::Can | Interface::CanFast => 1,
+                };
+                server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
+                server.send_byte_array_with_response(&[0x30, 0xF0, 0x07, log_mode], None)?;
+                drop(server);
+                attach_log(application, args.interface, args.can_iface);
+            }
+            Ok(())
         }
+
         Command::Read {
             start_address,
             end_address,

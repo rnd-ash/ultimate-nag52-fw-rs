@@ -1,14 +1,27 @@
 #![no_std]
 #![no_main]
 
-use core::{panic::PanicInfo};
+use core::panic::PanicInfo;
 
 use atsamd_hal::{
-    clock::v2::{clock_system_at_reset, dpll::Dpll, gclk::{Gclk, GclkDiv16}, pclk::Pclk}, ehal::digital::OutputPin, nvm::{Nvm, smart_eeprom::SmartEepromMode}, pac::Peripherals
+    clock::v2::{
+        clock_system_at_reset,
+        dpll::Dpll,
+        gclk::{Gclk, GclkDiv16},
+        pclk::Pclk,
+    },
+    ehal::digital::OutputPin,
+    nvm::{Nvm, smart_eeprom::SmartEepromMode},
+    pac::Peripherals,
 };
 
 use cortex_m_rt::entry;
-use diag_common::{MemoryRegion, hal_extensions::dsu::{self, Dsu}, parse_git_sha, parse_u8, ram_info, smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info}};
+use diag_common::{
+    MemoryRegion,
+    hal_extensions::dsu::{self, Dsu},
+    parse_git_sha, parse_u8, ram_info,
+    smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info},
+};
 
 unsafe extern "C" {
     static mut _can_ram_addr: u8;
@@ -23,7 +36,7 @@ pub fn can_ram_end() -> u32 {
     (&raw mut _can_ram_end_addr).addr() as u32
 }
 
-pub const fn create_code_info(name: [u8; 10]) -> CodeSectionInfo {
+pub const fn create_code_info(name: [u8; 20]) -> CodeSectionInfo {
     CodeSectionInfo {
         name,
         git_sha: parse_git_sha(env!("VERGEN_GIT_SHA")),
@@ -65,34 +78,45 @@ fn main() -> ! {
     let mut stat = pins.led_stat_ok.into_push_pull_output();
     stat.set_high().unwrap();
 
-    let (_bus, clocks, tokens) = clock_system_at_reset(bsp_peripherals.oscctrl, bsp_peripherals.osc32kctrl, bsp_peripherals.gclk, bsp_peripherals.mclk, &mut bsp_peripherals.nvmctrl);
+    let (_bus, clocks, tokens) = clock_system_at_reset(
+        bsp_peripherals.oscctrl,
+        bsp_peripherals.osc32kctrl,
+        bsp_peripherals.gclk,
+        bsp_peripherals.mclk,
+        &mut bsp_peripherals.nvmctrl,
+    );
 
     let mut nvm = Nvm::new(bsp_peripherals.nvmctrl);
     let mut dsu = Dsu::new(bsp_peripherals.dsu, &bsp_peripherals.pac).unwrap();
     // Ram test
     unsafe {
         // Clock to 120Mhz briefly so we can run RAM test as fast as possible
-        let (gclk1, dfll) = Gclk::from_source(tokens.gclks.gclk1, clocks.dfll);
-        let gclk1 = gclk1.div(GclkDiv16::Div(24)).enable(); // Gclk1 is now at 2Mhz
-        let (clk_dpll0, _gclk1) = Pclk::enable(tokens.pclks.dpll0, gclk1);
-        // DPLL0 at 120Mhz (2*60)
-        let dpll0 = Dpll::from_pclk(tokens.dpll0, clk_dpll0)
-            .loop_div(60, 0)
-            .enable();
-        let (gclk0_100, dfll, dpll0) = clocks.gclk0.swap_sources(dfll, dpll0);
-        // Test MCAN RAM region (As we can't test it when MCAN is running)
-        ram_info::modify_bootloader_info(|f| {
-            if f.ram_failure.is_none() {
-                let len = can_ram_end()-can_ram_start();
-                if let Err(dsu::Error::RamTestFailed { addr, phase, bit }) = dsu.memory_test(can_ram_start(), len) {
-                    f.ram_failure = Some((addr, bit, phase));
-                }       
+        //let (gclk1, dfll) = Gclk::from_source(tokens.gclks.gclk1, clocks.dfll);
+        //let gclk1 = gclk1.div(GclkDiv16::Div(24)).enable(); // Gclk1 is now at 2Mhz
+        //let (clk_dpll0, _gclk1) = Pclk::enable(tokens.pclks.dpll0, gclk1);
+        //// DPLL0 at 120Mhz (2*60)
+        //let dpll0 = Dpll::from_pclk(tokens.dpll0, clk_dpll0)
+        //    .loop_div(60, 0)
+        //    .enable();
+        //let (gclk0_100, dfll, dpll0) = clocks.gclk0.swap_sources(dfll, dpll0);
+        //// Test MCAN RAM region (As we can't test it when MCAN is running)
+        let has_ram_failure = ram_info::get_bootloader_comm_info(&mut dsu)
+            .map(|x| x.ram_failure.is_some())
+            .unwrap_or_default();
+        if !has_ram_failure {
+            let len = can_ram_end() - can_ram_start();
+            if let Err(dsu::Error::RamTestFailed { addr, phase, bit }) =
+                dsu.memory_test(can_ram_start(), len)
+            {
+                ram_info::modify_bootloader_info(&mut dsu, |f| {
+                    f.ram_failure = Some((addr, bit, phase))
+                });
             }
-        });
+        }
 
         // Revert clocks
-        let (_gclk0_48, dpll0, _dfll) = gclk0_100.swap_sources(dpll0, dfll);
-        let _disabled_dpll0 = dpll0.disable();
+        //let (_gclk0_48, dpll0, _dfll) = gclk0_100.swap_sources(dpll0, dfll);
+        //let _disabled_dpll0 = dpll0.disable();
     }
     let bl_info = if let Ok(smart_eeprom) = nvm.smart_eeprom() {
         // Start smart EEPROM in locked mode
@@ -101,7 +125,7 @@ fn main() -> ! {
             SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
         };
         mutate_smarteeprom_info(&mut smart_eeprom, |info| {
-            const SECTION_INFO: CodeSectionInfo = create_code_info(*b"UN52PICPRE");
+            const SECTION_INFO: CodeSectionInfo = create_code_info(*b"UN52PIC32CXSGPRELOAD");
             if info.preloader_info != SECTION_INFO {
                 info.preloader_info = SECTION_INFO
             }
@@ -112,13 +136,17 @@ fn main() -> ! {
     } else {
         None
     };
-    if let Some(info) = bl_info && info.bl_flashing_pending == 0 {
+    if let Some(info) = bl_info
+        && info.bl_flashing_pending == 0
+    {
         unsafe {
             // We have to copy the bootloader portions
-            let scratch_crc = dsu.crc32(
-                MemoryRegion::BootloaderScratch.start_addr(),
-                MemoryRegion::BootloaderScratch.size_bytes()
-                ).unwrap_or(0xFFFF_FFFF);
+            let scratch_crc = dsu
+                .crc32(
+                    MemoryRegion::BootloaderScratch.start_addr(),
+                    MemoryRegion::BootloaderScratch.size_bytes(),
+                )
+                .unwrap_or(0xFFFF_FFFF);
             if scratch_crc == info.crc32_bl {
                 // Can copy (Sig. valid)
                 let bootloader_region = MemoryRegion::Bootloader;
@@ -141,14 +169,15 @@ fn main() -> ! {
                 SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
             };
             // Set the flags so that we don't do this on next boot
-            let _ =
-                mutate_smarteeprom_info(&mut unlocked_eeprom, |info| {
-                    info.bl_flashing_pending = 0xFF;
-                    info.crc32_bl =dsu.crc32(
+            let _ = mutate_smarteeprom_info(&mut unlocked_eeprom, |info| {
+                info.bl_flashing_pending = 0xFF;
+                info.crc32_bl = dsu
+                    .crc32(
                         MemoryRegion::Bootloader.start_addr(),
-                        MemoryRegion::Bootloader.size_bytes()
-                    ).unwrap_or(0xFFFF_FFFF)
-                });
+                        MemoryRegion::Bootloader.size_bytes(),
+                    )
+                    .unwrap_or(0xFFFF_FFFF)
+            });
         }
     }
     // Jump to bootloader

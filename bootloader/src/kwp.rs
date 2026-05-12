@@ -2,7 +2,6 @@ use core::{ptr::NonNull, sync::atomic::Ordering};
 
 use atsamd_hal::{
     self,
-    dsu::Dsu,
     fugit::ExtU64,
     nvm::{
         self, Nvm,
@@ -15,12 +14,13 @@ use atsamd_hal::{
 pub use automotive_diag::kwp2000::*;
 use cortex_m::peripheral::SCB;
 use diag_common::{
-    BootloaderStayReason, MemoryRegion, ram_info::BootloaderRamInfo, smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info}
+    BootloaderStayReason, MemoryRegion,
+    hal_extensions::dsu::Dsu,
+    ram_info::BootloaderRamInfo,
+    smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info},
 };
 
-use crate::{
-    BS_EGS, Mono, ST_MIN_EGS,
-};
+use crate::{BS_EGS, Mono, ST_MIN_EGS};
 
 #[derive(Copy, Clone)]
 pub enum PendingOperation {
@@ -551,19 +551,25 @@ impl KwpServer {
                     mutate_smarteeprom_info(&mut eeprom, |info| {
                         info.bl_flashing_pending = 0;
                         info.bootloader_info.clear();
-                        info.crc32_bl = self.dsu.crc32(
-                            MemoryRegion::BootloaderScratch.start_addr(),
-                            MemoryRegion::BootloaderScratch.size_bytes()
-                        ).unwrap_or(0xFFFF_FFFF)
+                        info.crc32_bl = self
+                            .dsu
+                            .crc32(
+                                MemoryRegion::BootloaderScratch.start_addr(),
+                                MemoryRegion::BootloaderScratch.size_bytes(),
+                            )
+                            .unwrap_or(0xFFFF_FFFF)
                     });
                 } else {
                     mutate_smarteeprom_info(&mut eeprom, |info| {
                         info.app_flashing_not_done = 0;
                         info.firmware_info.clear();
-                        info.crc32_app = self.dsu.crc32(
-                            MemoryRegion::Application.start_addr(),
-                            MemoryRegion::Application.size_bytes()
-                        ).unwrap_or(0xFFFF_FFFF)
+                        info.crc32_app = self
+                            .dsu
+                            .crc32(
+                                MemoryRegion::Application.start_addr(),
+                                MemoryRegion::Application.size_bytes(),
+                            )
+                            .unwrap_or(0xFFFF_FFFF)
                     });
                 }
                 Ok(self.make_positive_reply(cmd[0], &[0xE1, 0x01]))

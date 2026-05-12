@@ -42,7 +42,7 @@ bitflags! {
 
 impl EgsDeviceMode {
     /// If this function returns false, the solenoid
-    /// high side power is turned off shutting off
+    /// high side power is turned off, shutting off
     /// power to all the solenoids.
     pub fn solenoid_output_allowed(&self) -> bool {
         let banned_modes = Self::TEMP_EMERGENCY

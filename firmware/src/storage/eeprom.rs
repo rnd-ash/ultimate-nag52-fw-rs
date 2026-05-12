@@ -28,12 +28,15 @@
 
 use arbitrary_int::{u7, u9};
 use atsamd_hal::{
-    dmac, ehal_async::i2c::I2c, fugit::ExtU64, rtic_time::Monotonic, sercom::i2c::{self, I2cFutureDma}
+    dmac,
+    ehal_async::i2c::I2c,
+    fugit::ExtU64,
+    rtic_time::Monotonic,
+    sercom::i2c::{self, I2cFutureDma},
 };
-use diag_common::hal_extensions::dsu::Dsu;
 use bsp::EepromPads;
 use defmt::println;
-use diag_common::embedded_crc32c;
+use diag_common::hal_extensions::dsu::Dsu;
 use rtic_sync::arbiter::Arbiter;
 
 use crate::Mono;
@@ -41,7 +44,7 @@ use crate::Mono;
 pub const EEPROM_VER_MAJOR: u16 = 1;
 pub const EEPROM_VER_MINOR: u16 = 0;
 pub const EEPROM_I2C_ADDR: u8 = 0x50;
-const EEPROM_BLOCKS: usize = (32*1024)/64;
+const EEPROM_BLOCKS: usize = (32 * 1024) / 64;
 
 pub struct EepromHeader {
     /// Major version (If changed, the entire
@@ -82,8 +85,10 @@ impl EepromBlock {
 
     pub fn unpack(buf: [u8; 64]) -> Self {
         Self {
-            header: EepromBlkHeader::new_with_raw_value(u32::from_le_bytes(buf[..4].try_into().unwrap())),
-            data: buf[4..].try_into().unwrap()
+            header: EepromBlkHeader::new_with_raw_value(u32::from_le_bytes(
+                buf[..4].try_into().unwrap(),
+            )),
+            data: buf[4..].try_into().unwrap(),
         }
     }
 }
@@ -94,12 +99,17 @@ pub struct Eeprom<C: dmac::ChId> {
 }
 
 impl<C: dmac::ChId> Eeprom<C> {
-    pub fn new(i2c: I2cFutureDma<i2c::Config<EepromPads>, C>, arbiter: &'static Arbiter<Dsu>) -> Self {
+    pub fn new(
+        i2c: I2cFutureDma<i2c::Config<EepromPads>, C>,
+        arbiter: &'static Arbiter<Dsu>,
+    ) -> Self {
         Self { i2c, arbiter }
     }
 
-    pub fn crc16(&mut self, data: &[u8]) -> u16 {
-        (embedded_crc32c::crc32c(data) & 0xFFFF_FFFF) as u16
+    pub async fn crc32(&mut self, data: &[u8]) -> u32 {
+        let mut dsu = self.arbiter.access().await;
+        //
+        0
     }
 
     async fn init_block(&mut self, id: u16) {
@@ -109,9 +119,9 @@ impl<C: dmac::ChId> Eeprom<C> {
                 .with_version(u7::new(0)),
             data: [0; 60],
         };
-        let crc = self.crc16(&blk.data);
-        blk.header.set_crc(crc);
-        let addr = id*64;
+        let crc = self.crc32(&blk.data).await;
+        blk.header.set_crc((crc & 0xFFFF) as u16);
+        let addr = id * 64;
         let mut buf = [0; 66];
         buf[..2].copy_from_slice(&addr.to_be_bytes());
         buf[2..].copy_from_slice(&blk.pack());

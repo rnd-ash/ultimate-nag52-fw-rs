@@ -5,29 +5,31 @@ use crate::can::data::SignalFrame;
 use crate::can::egs52::Egs52Can;
 use crate::can::slave::{self, SlaveCan};
 use crate::diag::KwpServer;
-use crate::hal_extension::evsys;
-use crate::sensors::{AdcData, SensorData};
+use crate::hal_extension::{self, evsys};
 use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
 use crate::sensors::speed_sensors::{AllSpeedSensors, IntN2RpmPc, IntN3RpmPc, init_speed_sensor};
 use crate::sensors::variable_adc_input::VariableAdcInput;
+use crate::sensors::{AdcData, SensorData};
 use crate::solenoids::SolenoidControler;
 use crate::solenoids::tcc_sol::TccSol;
 use crate::solenoids::tle8242::{TLE_SPI_BAUD, Tle8242, Tle8242Pins};
 use crate::storage::eeprom::Eeprom;
 use crate::usb::UsbData;
-use crate::{CAN_ID_DIAG_RX, CAN_ID_DIAG_TX, DmacIrqs, Mono, Sercom2Irqs, Sercom6Irqs, app, create_code_info};
+use crate::{
+    CAN_ID_DIAG_RX, CAN_ID_DIAG_TX, DmacIrqs, Mono, Sercom2Irqs, Sercom6Irqs, app, create_code_info,
+};
 
-use app::init::Context as InitContext;
 use app::async_init::Context as AsyncInitContext;
+use app::init::Context as InitContext;
 use app::{Resources, Shared};
 use atsamd_hal::can::Dependencies;
-use atsamd_hal::clock::v2::{Source, clock_system_at_reset, pclk};
 use atsamd_hal::clock::v2::dfll::FromUsb;
 use atsamd_hal::clock::v2::dpll::Dpll;
 use atsamd_hal::clock::v2::gclk::{Gclk, GclkDiv8, GclkDiv16};
 use atsamd_hal::clock::v2::osculp32k::OscUlp32k;
 use atsamd_hal::clock::v2::pclk::Pclk;
 use atsamd_hal::clock::v2::rtcosc::RtcOsc;
+use atsamd_hal::clock::v2::{Source, clock_system_at_reset, pclk};
 use atsamd_hal::dmac::{self, DmaController, PriorityLevel};
 use atsamd_hal::eic::Eic;
 use atsamd_hal::fugit::{ExtU64, HertzU32, RateExtU32};
@@ -42,20 +44,21 @@ use atsamd_hal::usb::usb_device::device::{StringDescriptors, UsbDeviceBuilder, U
 use atsamd_hal::watchdog::Watchdog;
 use bsp::can_deps::{self, Capacities};
 use cortex_m::prelude::_embedded_hal_watchdog_Watchdog;
-use defmt::println;
+use diag_common::{DefmtTarget, defmt_multi_output};
+use diag_common::hal_extensions::dsu::Dsu;
 use diag_common::isotp_endpoints::can_isotp::make_isotp_endpoint;
 use diag_common::isotp_endpoints::usb_isotp::new_usb_isotp;
-use diag_common::smarteeprom::{CodeSectionInfo, mutate_smarteeprom_info};
+use diag_common::smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info};
 use heapless::format;
 use mcan::embedded_can::{Id, StandardId};
 use rtic_sync::arbiter::Arbiter;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
-use mcan::interrupt::Interrupt as McanInterrupt;
 use mcan::filter::Filter as McanFilter;
-
+use mcan::interrupt::Interrupt as McanInterrupt;
 
 pub fn init(cx: InitContext) -> (Shared, Resources) {
+    defmt_multi_output::init();
     let mut device = cx.device;
     let _core: rtic::export::Peripherals = cx.core;
     let pins = bsp::Pins::new(device.port);
@@ -154,7 +157,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
         };
         mutate_smarteeprom_info(&mut smart_eeprom, |info| {
-            const SECTION_INFO: CodeSectionInfo = create_code_info(*b"UN52PICEGS");
+            const SECTION_INFO: CodeSectionInfo = create_code_info(*b"UN52PIC32CXSGEGSFW  ");
             if info.firmware_info != SECTION_INFO {
                 info.firmware_info = SECTION_INFO
             }
@@ -356,25 +359,42 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
 
     for filter in can_layer.filters() {
         if can0_cfg
-        .filters_standard()
-        .push(McanFilter::Classic {
-            action: mcan::filter::Action::StoreFifo0,
-            filter: filter.id,
-            mask: filter.mask,
-        }).is_err() {
-            panic!("Could not allocate CAN Filter for (ID: 0x{:04X}, MSK: 0x{:04X})", filter.id.as_raw(), filter.mask.as_raw());
+            .filters_standard()
+            .push(McanFilter::Classic {
+                action: mcan::filter::Action::StoreFifo0,
+                filter: filter.id,
+                mask: filter.mask,
+            })
+            .is_err()
+        {
+            panic!(
+                "Could not allocate CAN Filter for (ID: 0x{:04X}, MSK: 0x{:04X})",
+                filter.id.as_raw(),
+                filter.mask.as_raw()
+            );
         }
     }
 
     // Enable new MSG interrupt for FIFO0
     let interrupts = can0_cfg
         .interrupts()
-        .split([McanInterrupt::RxFifo0NewMessage, McanInterrupt::MessageStoredToDedicatedRxBuffer].iter().copied().collect())
+        .split(
+            [
+                McanInterrupt::RxFifo0NewMessage,
+                McanInterrupt::MessageStoredToDedicatedRxBuffer,
+            ]
+            .iter()
+            .copied()
+            .collect(),
+        )
         .unwrap();
     let line0_interrupts = can0_cfg.interrupt_configuration().enable_line_0(interrupts);
     let can = can0_cfg.finalize().unwrap();
 
     let arbiter_cantx: &'static _ = cx.local.arbiter_cantx.insert(Arbiter::new(can.tx));
+    // Set DEFMT Logger
+    defmt_multi_output::set_defmt_can_logger(arbiter_cantx);
+
     let (isotp_isr, isotp_thread) = make_isotp_endpoint(
         Id::Standard(CAN_ID_DIAG_TX),
         Id::Standard(CAN_ID_DIAG_RX),
@@ -400,23 +420,39 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
         .local
         .arbiter_serial
         .insert(Arbiter::new(SerialPort::new(usb_alloc)));
+    // Configure and setup loggers
+    defmt_multi_output::set_defmt_serial_logger(uart);
+    
+
+    let mut smart_eeprom = match nvm.smart_eeprom().unwrap() {
+        SmartEepromMode::Locked(smart_eeprom) => smart_eeprom.unlock(),
+        SmartEepromMode::Unlocked(smart_eeprom) => smart_eeprom,
+    };
+    let seeprom_info = get_smarteeprom_info(&mut smart_eeprom);
+    let defmt_ep = match seeprom_info.defmt_ep {
+        0x01 => DefmtTarget::Can,
+        0x02 => DefmtTarget::Serial,
+        _ => DefmtTarget::Rtt
+    };
+    let _ = defmt_multi_output::set_defmt_log_mode(defmt_ep);
+
+
     // Write down the device serial number in ASCII form
     let sn = serial_number();
     for b in sn {
         let _ = cx.local.usb_sn.push_str(&format!(2; "{b:02X}").unwrap());
     }
     // Build up the USB device
-    let usb =
-        UsbDeviceBuilder::new(usb_alloc, UsbVidPid(0x16c0, 0x27de), cx.local.usb_ctrl_buf)
-            .strings(&[StringDescriptors::default()
-                .manufacturer("rnd-ash")
-                .product("Ultimate NAG52 V2")
-                .serial_number(cx.local.usb_sn)])
-            .expect("Failed to set strings")
-            .device_class(USB_CLASS_CDC)
-            .usb_rev(UsbRev::Usb200)
-            .build()
-            .unwrap();
+    let usb = UsbDeviceBuilder::new(usb_alloc, UsbVidPid(0x16c0, 0x27de), cx.local.usb_ctrl_buf)
+        .strings(&[StringDescriptors::default()
+            .manufacturer("rnd-ash")
+            .product("Ultimate NAG52 V2")
+            .serial_number(cx.local.usb_sn)])
+        .expect("Failed to set strings")
+        .device_class(USB_CLASS_CDC)
+        .usb_rev(UsbRev::Usb200)
+        .build()
+        .unwrap();
     // Configure the USB ISOTP endpoint (Over serial)
     let (isotp_usb_tx, isotp_usb_thread) = new_usb_isotp(uart, cx.local.isotp_msg_signal_usb);
     let usb_data = UsbData {
@@ -425,7 +461,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
         isotp: isotp_usb_tx,
     };
 
-    app::async_init::spawn(arbiter_cantx, eeprom, solenoid_io)
+    app::async_init::spawn(dsu, arbiter_cantx, eeprom, solenoid_io)
         .unwrap_or_else(|_| panic!("Could not start async init"));
     app::perf_monitor::spawn(gclk0_100.freq().raw()).unwrap();
 
@@ -440,7 +476,8 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             sensor_data: SensorData::default(),
             cpu_idle_ticks: AtomicU32::new(0),
             hw_interrupts: AtomicU32::new(0),
-            dsu
+            wakeups: AtomicU32::new(0),
+            dsu,
         },
         Resources {
             adc_data,
@@ -452,26 +489,18 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             isotp_thread,
             usb_isotp_thread: isotp_usb_thread,
 
-            diag_server: KwpServer::new(),
+            diag_server: KwpServer::new(dsu),
         },
     )
 }
 
-
 pub async fn async_init(
     _ctx: AsyncInitContext<'_>,
+    dsu: &'static Arbiter<Dsu>,
     can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
     mut eeprom: Eeprom<dmac::Ch2>,
     mut solenoid_io: SolenoidControler<dmac::Ch0, dmac::Ch1>,
 ) {
-    if let Some(info) = diag_common::ram_info::get_bootloader_comm_info() {
-        println!("BL INFO COUNTER: {}", info.reset_counter);
-    } else {
-        defmt::error!("BL INFO CORRUPT");
-        let addr = 0x20010000 as *const u8;
-        let arr = unsafe { core::ptr::slice_from_raw_parts(addr, 512).as_ref().unwrap() };
-        println!("{:02X}", arr);
-    }
     app::sensor_query::spawn().unwrap();
     eeprom.init().await;
     solenoid_io.init().await;
@@ -482,7 +511,8 @@ pub async fn async_init(
     // are initializing
     Mono::delay(5000u64.millis()).await;
     // Now reset the reset counter
-    diag_common::ram_info::modify_bootloader_info(|info| {
+    let mut dsu_lock = dsu.access().await;
+    diag_common::ram_info::modify_bootloader_info(&mut dsu_lock, |info| {
         info.reset_counter = 0;
     });
 }

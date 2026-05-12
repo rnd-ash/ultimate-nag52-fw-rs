@@ -17,7 +17,9 @@ use atsamd_hal::{
 use futures::join;
 
 use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
-use crate::{Adc0Irqs, Adc1Irqs, maths};
+use crate::{Adc0Irqs, Adc1Irqs};
+
+use maths;
 
 pub mod adc;
 pub mod speed_sensors;

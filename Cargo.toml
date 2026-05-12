@@ -1,11 +1,5 @@
 [workspace]
-members = [
-    "firmware",
-    "bsp",
-    "bootloader",
-    "diag_common",
-    "preloader", 
-]
+members = ["firmware", "bsp", "bootloader", "diag_common", "preloader", "maths"]
 
 exclude = ["candb_codegen", "flasher"]
 
@@ -31,8 +25,9 @@ resolver = "3"
 #    "usb-buffer-4k",
 #] }
 
-atsamd-hal = { git="https://github.com/rnd-ash/atsamd/", branch="feat/pic32cxsg", features = [
+atsamd-hal = { git = "https://github.com/rnd-ash/atsamd/", branch = "feat/pic32cxsg", features = [
     "pic32cxsg41128-rt",
+    #"same54p-rt",
     "can",
     "async",
     "dma",

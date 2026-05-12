@@ -1,11 +1,13 @@
 //! Userpage information
 
-#[cfg(feature="mcu")]
+#[cfg(feature = "mcu")]
 use atsamd_hal::nvm::smart_eeprom::*;
+
+use crate::DefmtTarget;
 
 #[repr(C, packed(4))]
 #[derive(Clone, Copy)]
-#[cfg_attr(feature="mcu", derive(defmt::Format))]
+#[cfg_attr(feature = "mcu", derive(defmt::Format))]
 pub struct SmartEepromInfo {
     /// Board production day - Burned to the device via bootloader
     pub board_prod_day: u8,
@@ -26,14 +28,16 @@ pub struct SmartEepromInfo {
     pub crc32_app: u32,
     /// CRC32 of Bootloader region
     pub crc32_bl: u32,
+    /// Boot logger endpoint
+    pub defmt_ep: u8
 }
 
 impl SmartEepromInfo {
     pub fn is_production_date_set(&self) -> bool {
-        self.board_prod_day != 0xFF
-            && self.board_prod_month != 0xFF
-            && self.board_prod_week != 0xFF
-            && self.board_prod_year != 0xFF
+        (1..=31).contains(&self.board_prod_day)
+            && (1..=52).contains(&self.board_prod_week)
+            && (1..=12).contains(&self.board_prod_month)
+            && (26..=99).contains(&self.board_prod_year)
     }
 }
 
@@ -47,7 +51,7 @@ static_assertions::const_assert!(size_of::<SmartEepromInfo>() < 512);
 /// This function erases the info page and then writes it back, therefore
 /// if power loss occurs during erase, then the bootloader info section
 /// will be corrupt
-#[cfg(feature="mcu")]
+#[cfg(feature = "mcu")]
 pub fn mutate_smarteeprom_info<'a, F: FnOnce(&mut SmartEepromInfo)>(
     seeprom: &mut SmartEeprom<'a, Unlocked>,
     f: F,
@@ -61,7 +65,7 @@ pub fn mutate_smarteeprom_info<'a, F: FnOnce(&mut SmartEepromInfo)>(
     *mut_s
 }
 
-#[cfg(feature="mcu")]
+#[cfg(feature = "mcu")]
 pub fn get_smarteeprom_info<'a, T: SmartEepromState>(
     seeprom: &SmartEeprom<'a, T>,
 ) -> SmartEepromInfo {
@@ -74,9 +78,9 @@ pub fn get_smarteeprom_info<'a, T: SmartEepromState>(
 
 #[derive(Clone, Copy)]
 #[repr(C, packed(4))]
-#[cfg_attr(feature="mcu", derive(defmt::Format))]
+#[cfg_attr(feature = "mcu", derive(defmt::Format))]
 pub struct CodeSectionInfo {
-    pub name: [u8; 10],
+    pub name: [u8; 20],
     pub git_sha: [u8; 12],
     pub version_major: u8,
     pub version_minor: u8,

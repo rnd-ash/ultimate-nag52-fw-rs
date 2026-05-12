@@ -5,17 +5,20 @@ use atsamd_hal::adc;
 use atsamd_hal::adc::Adc0;
 use atsamd_hal::adc::Adc1;
 use atsamd_hal::bind_multiple_interrupts;
+use atsamd_hal::pac::Peripherals;
+use atsamd_hal::pac::SCB;
 use atsamd_hal::rtc::rtic::rtc_clock;
+use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::sercom::Sercom2;
 use atsamd_hal::sercom::Sercom6;
-use atsamd_hal::pac::SCB;
-use diag_common::parse_git_sha;
-use diag_common::parse_u8;
-use diag_common::smarteeprom::CodeSectionInfo;
 use core::panic::PanicInfo;
 use core::sync::atomic::AtomicU32;
 use cortex_m_rt::exception;
-use defmt_rtt as _;
+//use defmt_rtt as _;
+use diag_common::hal_extensions::dsu::Dsu;
+use diag_common::parse_git_sha;
+use diag_common::parse_u8;
+use diag_common::smarteeprom::CodeSectionInfo;
 use diag_common::{dyn_panic::AppPanicInfo, ram_info::modify_bootloader_info};
 use mcan::embedded_can::StandardId;
 use rtic_sync::portable_atomic::AtomicU16;
@@ -25,13 +28,14 @@ use crate::diag::dev_mode::EgsDeviceMode;
 pub mod can;
 pub mod diag;
 pub mod hal_extension;
-pub mod maths;
+pub mod ram_test;
 pub mod sensors;
 pub mod solenoids;
 pub mod storage;
-pub mod usb;
-pub mod ram_test;
 pub mod tasks;
+pub mod usb;
+pub mod gearbox_control;
+pub mod calbrations;
 
 // -- Interrupt handlers for async APIs --  //
 bind_multiple_interrupts!(struct Sercom6Irqs {
@@ -54,19 +58,27 @@ atsamd_hal::bind_multiple_interrupts!(pub struct Adc1Irqs {
     ADC1: [ADC1_RESRDY, ADC1_OTHER] => adc::InterruptHandler<Adc1>;
 });
 
+// -- Timestamp for DEFMT -- //
+
+defmt::timestamp!("{=u64:us}", {
+    Mono::now().duration_since_epoch().to_micros()
+});
+
 // -- Panic handler -- //
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    defmt::error!("{}", info);
-    modify_bootloader_info(|inf| {
+    let p = unsafe { Peripherals::steal() };
+    let mut dsu = Dsu::new(p.dsu, &p.pac).unwrap();
+
+    modify_bootloader_info(&mut dsu, |inf| {
         let panic = AppPanicInfo::new(info);
         inf.app_panic = Some(panic);
     });
     SCB::sys_reset();
 }
 
-pub const fn create_code_info(name: [u8; 10]) -> CodeSectionInfo {
+pub const fn create_code_info(name: [u8; 20]) -> CodeSectionInfo {
     CodeSectionInfo {
         name,
         git_sha: parse_git_sha(env!("VERGEN_GIT_SHA")),
@@ -97,45 +109,38 @@ pub const CAN_ID_DIAG_RX: StandardId = unsafe { StandardId::new_unchecked(0x7E1)
 
 #[rtic::app(device = atsamd_hal::pac, dispatchers = [DAC_EMPTY_0, DAC_EMPTY_1, EVSYS_0, EVSYS_1])]
 mod app {
-    
 
     use crate::{
-        can::{
-            CanLayer, CanLayerTy,
-            slave::SlaveCan,
-        },
+        can::{CanLayer, CanLayerTy, slave::SlaveCan},
         diag::KwpServer,
-        sensors::{
-            AdcData, SensorData,
-            speed_sensors::AllSpeedSensors,
-        },
-        solenoids::{
-            SolenoidControler,
-            tcc_sol::TccSol,
-        },
+        sensors::{AdcData, SensorData, speed_sensors::AllSpeedSensors},
+        solenoids::{SolenoidControler, tcc_sol::TccSol},
         storage::eeprom::Eeprom,
         usb::UsbData,
     };
     use atsamd_hal::{
-        clock::v2::{pclk, types::Can0}, dmac::{self}, usb::{
-            UsbBus,
-            usb_device::bus::UsbBusAllocator,
-        }, watchdog::Watchdog
+        clock::v2::{pclk, types::Can0},
+        dmac::{self},
+        usb::{UsbBus, usb_device::bus::UsbBusAllocator},
+        watchdog::Watchdog,
     };
     use bsp::can_deps::{Capacities, RxDedicated, RxFifo0};
-    use diag_common::isotp_endpoints::{
-        SharedIsoTpBuf,
-        can_isotp::{IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg},
-        usb_isotp::UsbIsoTpConsumer,
+    use diag_common::{
+        hal_extensions::dsu::Dsu,
+        isotp_endpoints::{
+            SharedIsoTpBuf,
+            can_isotp::{IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg},
+            usb_isotp::UsbIsoTpConsumer,
+        },
     };
-    
-    
+
     use mcan::{
         interrupt::{Interrupt, OwnedInterruptSet, state::EnabledLine0},
         message::Raw,
-        messageram::SharedMemory, rx_dedicated_buffers::DynRxDedicatedBuffer,
+        messageram::SharedMemory,
+        rx_dedicated_buffers::DynRxDedicatedBuffer,
     };
-    
+
     use rtic_sync::{arbiter::Arbiter, signal::Signal};
     use usbd_serial::{DefaultBufferStore, SerialPort};
 
@@ -175,7 +180,8 @@ mod app {
 
         pub cpu_idle_ticks: AtomicU32,
         pub hw_interrupts: AtomicU32,
-        pub dsu: &'static Arbiter<diag_common::hal_extensions::dsu::Dsu>
+        pub wakeups: AtomicU32,
+        pub dsu: &'static Arbiter<diag_common::hal_extensions::dsu::Dsu>,
     }
 
     #[init(local = [
@@ -198,26 +204,27 @@ mod app {
     #[task(priority = 1)]
     async fn async_init(
         ctx: async_init::Context,
+        dsu: &'static Arbiter<Dsu>,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
         eeprom: Eeprom<dmac::Ch2>,
         solenoid_io: SolenoidControler<dmac::Ch0, dmac::Ch1>,
     ) {
-        tasks::async_init(ctx, can_tx, eeprom, solenoid_io).await;
+        tasks::async_init(ctx, dsu, can_tx, eeprom, solenoid_io).await;
     }
 
-    #[idle(shared=[&cpu_idle_ticks, &hw_interrupts, &dsu])]
+    #[idle(shared=[&cpu_idle_ticks, &hw_interrupts, &wakeups, &dsu])]
     fn idle(ctx: idle::Context) -> ! {
         tasks::idle(&ctx)
     }
 
-    #[task(priority = 2, shared=[wdt, &cpu_idle_ticks, &hw_interrupts])]
+    #[task(priority = 2, shared=[wdt, &cpu_idle_ticks, &hw_interrupts, &wakeups])]
     async fn perf_monitor(ctx: perf_monitor::Context, tps: u32) {
         tasks::performance_monitor(ctx, tps).await;
     }
 
     #[task(priority = 2, local = [usb_isotp_thread, isotp_thread, diag_server])]
     async fn diag_task(cx: diag_task::Context) {
-        tasks::diag_task(cx).await
+        tasks::diag_task(cx).await;
     }
 
     #[task(priority = 1, local=[adc_data, speed_sensors], shared=[sensor_data])]
@@ -237,23 +244,27 @@ mod app {
     // -- HARDWARE TASKS BELOW --
 
     #[task(priority = 1, binds=USB_TRCPT0, shared=[usb_data])]
+    #[unsafe(link_section = ".data.usbtrcpt0")]
     fn usb_trcpt0(cx: usb_trcpt0::Context) {
         cx.shared.usb_data.poll();
     }
 
     #[task(priority = 1, binds=USB_TRCPT1, shared=[usb_data])]
+    #[unsafe(link_section = ".data.usbtrcpt1")]
     fn usb_trcpt1(cx: usb_trcpt1::Context) {
         cx.shared.usb_data.poll();
     }
 
     #[task(priority = 1, binds=USB_OTHER, shared=[usb_data])]
+    #[unsafe(link_section = ".data.usbother")]
     fn usb_other(cx: usb_other::Context) {
         cx.shared.usb_data.poll();
     }
 
-    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, can0_dedicated, isotp_isr], shared=[can_layer, slave_can])]
+    #[task(priority = 1, binds=CAN0, local=[can0_interrupts, can0_fifo0, can0_dedicated, isotp_isr, buf: [u8; 8] = [0; 8]], shared=[can_layer, slave_can])]
+    #[unsafe(link_section = ".data.can0")]
     fn can0(mut cx: can0::Context) {
-        let mut buf = [0; 8];
+        let buf = cx.local.buf;
         for interrupt in cx.local.can0_interrupts.iter_flagged() {
             match interrupt {
                 Interrupt::MessageStoredToDedicatedRxBuffer => {
@@ -300,19 +311,14 @@ mod app {
         cx.shared.soltcc.lock(|lck| lck.on_tcc_ovf());
     }
 
-    #[task(priority = 3, binds=TCC2_MC0, shared=[soltcc])]
-    fn tcc2_mc0(mut cx: tcc2_mc0::Context) {
-        cx.shared.soltcc.lock(|lck| lck.on_tcc_mc0());
-    }
-
     #[task(priority = 3, binds=TCC2_MC1, shared=[soltcc])]
-    fn tcc2_mc1(mut cx: tcc2_mc1::Context) {
+    fn tcc2_mc0(mut cx: tcc2_mc0::Context) {
         cx.shared.soltcc.lock(|lck| lck.on_tcc_mc1());
     }
 
-    #[task(priority = 3, binds=EIC_EXTINT_11, shared=[soltcc])]
-    fn eic_11(mut cx: eic_11::Context) {
-        cx.shared.soltcc.lock(|lck| lck.on_fdbk_spike());
+    #[task(priority = 3, binds=TCC2_MC2, shared=[soltcc])]
+    fn tcc2_mc1(mut cx: tcc2_mc1::Context) {
+        cx.shared.soltcc.lock(|lck| lck.on_tcc_mc2());
     }
 }
 
@@ -332,6 +338,4 @@ unsafe fn BusFault() {
 }
 
 #[exception]
-unsafe fn MemoryManagement() {
-
-}
+unsafe fn MemoryManagement() {}

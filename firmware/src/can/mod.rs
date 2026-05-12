@@ -3,11 +3,9 @@ use bsp::can_deps::Capacities;
 use mcan::embedded_can::{self, StandardId};
 
 use crate::{
-    can::{
-        egs52::Egs52Can,
-        input_output::{CanRxSignals, CanTxSignals},
-    },
-    Mono,
+    Mono, can::{
+        data::SignalFrame, egs52::Egs52Can, input_output::{CanRxSignals, CanTxSignals}
+    }
 };
 
 pub mod data;
@@ -55,13 +53,13 @@ macro_rules! handle_frames {
 /// ECU uses these to verify that the
 /// CAN data is not stagnent
 #[derive(Copy, Clone)]
-pub struct RxFrame<T: Copy> {
+pub struct RxFrame<T: SignalFrame> {
     frame: T,
     timestamp_ms: u64,
     seen: bool,
 }
 
-impl<T: Copy> RxFrame<T> {
+impl<T: SignalFrame> RxFrame<T> {
     /// Returns [None] if the frame has never been seen on the bus, or is stagnent
     /// otherwise, returns the CAN frame
     pub fn get(&self, max_ms: u64) -> Option<T> {

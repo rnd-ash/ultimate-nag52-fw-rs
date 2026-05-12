@@ -28,8 +28,8 @@ Ultimate-NAG52 is a long-running project of mine, creating a much better control
 |candb_codegen|A dependency of the firmware. This converts the CAN database text files into code at compile time for the firmware to use|
 |firmware|The TCU application code|
 |flasher|CLI flashing and diagnostics utility|
-|macros|Helper proc-macros for the firmware|
 |preloader|Preloader app which allows the bootloader to be self-updating|
+|maths|Maths library for TCU firmware (Separate library to allow for compile tests)|
 
 
 ## TCU Boot sequence
@@ -83,3 +83,71 @@ This is taken for a nominal boot (No regions are to be flashed). [Comparison YT 
 |0x20010000|0x200103FF|512|Bootloader<->Application communication|
 |0x20010000|0x200103FF|128|RAM Test scratch buffer|
 |0x20010400|0x20040000|191KB|RAM
+
+## Peripheral allocation and usage (For main firmware)
+
+### TCC
+
+|Peripheral|In use|Usage|
+|:-:|:-:|:-:|
+|TCC0|✔️|TLE8242 Clock generator|
+|TCC1|||
+|TCC2|✔️|TCC Solenoid|
+|TCC3|✔️|TCC Solenoid|
+|TCC4|||
+
+### TC
+
+|Peripheral|In use|Usage|
+|:-:|:-:|:-:|
+|TC0|✔️|Gearbox N2 RPM|
+|TC1|✔️|Gearbox N3 RPM|
+|TC2|✔️|TCC Solenoid|
+|TC3|✔️|TCC Solenoid|
+|TC4|||
+|TC5|||
+|TC6|||
+|TC7|||
+|TC8|||
+
+### SERCOM
+|Peripheral|In use|Usage|
+|:-:|:-:|:-:|
+|Sercom0|✔️|K-Line diagnostics|
+|Sercom1|||
+|Sercom2|✔️|EEPROM I2C|
+|Sercom3|||
+|Sercom4|||
+|Sercom5|||
+|Sercom6|✔️|TLE8242 SPI|
+
+### EIC Channels
+
+|Channel|In use|Usage|
+|:-:|:-:|:-:|
+|EIC 0|✔️|GPIO RPM signal 2|
+|EIC 1|✔️|GPIO RPM signal 3|
+|EIC 2|✔️|Gearbox N2 RPM|
+|EIC 3|✔️|Gearbox N3 RPM|
+|EIC 4|✔️|TLE8242 Fault signal|
+|EIC 5|✔️|GPIO RPM signal 1|
+|EIC 6|||
+|EIC 7|||
+|EIC 8|||
+|EIC 9|||
+|EIC 10|||
+|EIC 11|✔️|TCCSOL Feedback pulse|
+|EIC 12|||
+|EIC 13|||
+|EIC 14|||
+|EIC 15|||
+
+### DMA Channels
+
+### Others
+|Peripheral|In use|Usage|
+|:-:|:-:|:-:|
+|Watchdog|✔️|OS Watchdog|
+|QSPI|✔️|External flash|
+|USB|✔️|USB Serial CDC|
+|CAN|✔️|CAN Communication|

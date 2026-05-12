@@ -60,10 +60,16 @@ impl CanLayer<CanTxSignals, CanRxSignals> for Egs52Can {
         }
     }
 
-    fn write_signals(&mut self, _sigs: &CanTxSignals) {
+    fn write_signals(&mut self, sigs: &CanTxSignals) {
         // Finally, calculate parity and counters
         self.gs218.set_mtgl_egs(!self.gs218.mtgl_egs());
         //self.gs218.set_mpar_egs();
+
+        // Gear status
+        //self.gs418.set_gic(match sigs.gear_actual {
+        //    Some(Gear::PowerFreeInD) => EnumGic::GKraftfrei,
+        //    None => EnumGic::GSnv,
+        //});
     }
 
     fn on_frame(&mut self, id: mcan::embedded_can::Id, data: &[u8; 8]) {

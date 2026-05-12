@@ -10,6 +10,7 @@ edition = "2024"
 atsamd-hal = { workspace = true, features=["async", "dma", "rtic", "can"] }
 bsp = { path = "../bsp" }
 diag_common = { path = "../diag_common", features = ["mcu"] }
+maths={path="../maths"}
 cortex-m = { workspace = true, features = [
     "inline-asm",
     "linker-plugin-lto",
@@ -23,12 +24,10 @@ automotive_diag = { version = "0.1.21", default-features = false, features = [
 ] }
 rtic-sync = "1.4.0"
 
-# Format and printing to SWD
+# Format and printing
 defmt.workspace = true
-defmt-rtt.workspace = true
 
 # RTIC
-num-traits = { version = "0.2.19", default-features = false }
 rtic = { version = "2.2.0", features = ["thumbv7-backend"] }
 heapless = "0.9.1"
 

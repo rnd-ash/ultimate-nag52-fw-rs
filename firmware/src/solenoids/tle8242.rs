@@ -1,4 +1,4 @@
-use arbitrary_int::{traits::Integer, u11, u12, u14, u19, u5};
+use arbitrary_int::{traits::Integer, u5, u11, u12, u14, u19};
 use atsamd_hal::{
     clock::Tcc0Tcc1Clock,
     dmac,
@@ -10,24 +10,21 @@ use atsamd_hal::{
     prelude::_embedded_hal_Pwm,
     pwm::{Channel, TCC0Pinout, Tcc0Pwm},
     rtic_time::Monotonic,
-    sercom::{
-        spi::{self, SpiFutureDuplexDma},
-    },
+    sercom::spi::{self, SpiFutureDuplexDma},
     time::Hertz,
 };
 use bsp::{LedTle, TleClk, TleCs, TleEn, TleFault, TlePhaseSync, TleReset, TleSpiPads};
 
 use crate::{
+    Mono,
     solenoids::{
         commands::{
-            AutoZeroTriggerRead, AverageCurrentRead, ControlVarsSet,
-            CtrlMethodFaultMaskCfg, CurrentDitherAmpSet, DiagnosticTimer, DitherPeriodSet,
-            IcVersion, MainPeriodSet, PwmDutyCycle, ShortToBatThreshold, TleChannel,
-            TleMsg,
+            AutoZeroTriggerRead, AverageCurrentRead, ControlVarsSet, CtrlMethodFaultMaskCfg,
+            CurrentDitherAmpSet, DiagnosticTimer, DitherPeriodSet, IcVersion, MainPeriodSet,
+            PwmDutyCycle, ShortToBatThreshold, TleChannel, TleMsg,
         },
         solenoid_ctrl::Mode,
     },
-    Mono,
 };
 
 pub struct Tle8242Pins {

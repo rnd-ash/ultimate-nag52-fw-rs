@@ -102,12 +102,12 @@ impl<Id: ChId, GEN: EvSysGenerator> EvSysChannel<Id, GenReady<GEN>> {
 
     pub fn register_user<USR: EvSysUser>(self) -> EvSysChannel<Id, Ready<GEN, USR>> {
         // Now wire up the generator
-        // Multiplexor MUST be wired before the channel
+        // Multiplexer MUST be wired before the channel
         self.evsys
             .user(USR::USER_ID)
             .write(|w| unsafe { w.channel().bits(Id::ID as u8 + 1) }); // +1 since 0 means no channel
 
-        self.evsys.channels(Id::ID as usize).channel().write(|w| {
+        self.evsys.channels(Id::ID).channel().write(|w| {
             w.path().asynchronous();
             w.edgsel().no_evt_output();
             unsafe { w.evgen().bits(GEN::GENERATOR_ID) }
@@ -120,7 +120,7 @@ impl<Id: ChId, GEN: EvSysGenerator> EvSysChannel<Id, GenReady<GEN>> {
 impl<Id: ChId, GEN: EvSysGenerator, USR: EvSysUser> EvSysChannel<Id, Ready<GEN, USR>> {
     pub fn deregister_user(self) -> EvSysChannel<Id, GenReady<GEN>> {
         // Unhook the channel generator
-        let reg = self.evsys.channels(Id::ID as usize);
+        let reg = self.evsys.channels(Id::ID);
         reg.channel().reset();
         // Then unhook the user
         self.evsys
@@ -130,12 +130,12 @@ impl<Id: ChId, GEN: EvSysGenerator, USR: EvSysUser> EvSysChannel<Id, Ready<GEN, 
     }
 
     pub fn user_ready(&self) -> bool {
-        let reg = self.evsys.channels(Id::ID as usize);
+        let reg = self.evsys.channels(Id::ID);
         reg.chstatus().read().rdyusr().bit_is_set()
     }
 
     pub fn busy(&self) -> bool {
-        let reg = self.evsys.channels(Id::ID as usize);
+        let reg = self.evsys.channels(Id::ID);
         reg.chstatus().read().busych().bit_is_set()
     }
 }
