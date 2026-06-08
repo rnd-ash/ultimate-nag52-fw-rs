@@ -10,3 +10,7 @@ run_fw *args:
     just build_cli_app
     cargo build --release
     ./../flasher/target/release/flasher {{args}} flash --application ../target/thumbv7em-none-eabihf/release/firmware -l
+
+ident *args:
+    just build_cli_app
+    ./flasher/target/release/flasher {{args}} ident

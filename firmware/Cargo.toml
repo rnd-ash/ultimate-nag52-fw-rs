@@ -10,7 +10,8 @@ edition = "2024"
 atsamd-hal = { workspace = true, features=["async", "dma", "rtic", "can"] }
 bsp = { path = "../bsp" }
 diag_common = { path = "../diag_common", features = ["mcu"] }
-maths={path="../maths"}
+egs_maths={path="../egs_maths"}
+egs_logic={path="../egs_logic"}
 cortex-m = { workspace = true, features = [
     "inline-asm",
     "linker-plugin-lto",
@@ -41,7 +42,6 @@ seq-macro = "0.3.6"
 pastey = "0.1.1"
 
 [build-dependencies]
-candb_codegen = { path = "../candb_codegen" }
 chrono = { version = "0.4", default-features = false, features = ["now"] }
 rustc_version = "0.4.1"
 vergen = { version = "9.1.0" }

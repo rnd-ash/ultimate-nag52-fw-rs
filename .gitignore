@@ -14,5 +14,8 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
-firmware/src/can/data/**
+egs_can/src/can_matrix/custom_can/**
+egs_can/src/can_matrix/hfm/**
+egs_can/src/can_matrix/egs_5*/**
+
 **/.vscode/launch.json

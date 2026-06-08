@@ -1,0 +1,10 @@
+[package]
+name = "egs_logic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+defmt = {workspace=true}
+bitflags = "2.12.1"
+egs_can = {path="../egs_can"}
+egs_maths = {path="../egs_maths"}

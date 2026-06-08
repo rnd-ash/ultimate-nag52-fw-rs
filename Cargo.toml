@@ -1,5 +1,5 @@
 [workspace]
-members = ["firmware", "bsp", "bootloader", "diag_common", "preloader", "maths"]
+members = ["firmware", "bsp", "bootloader", "diag_common", "preloader", "egs_maths", "egs_logic", "egs_can"]
 
 exclude = ["candb_codegen", "flasher"]
 

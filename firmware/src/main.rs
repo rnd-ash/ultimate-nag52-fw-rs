@@ -25,7 +25,6 @@ use rtic_sync::portable_atomic::AtomicU16;
 
 use crate::diag::dev_mode::EgsDeviceMode;
 
-pub mod can;
 pub mod diag;
 pub mod hal_extension;
 pub mod ram_test;
@@ -36,6 +35,7 @@ pub mod tasks;
 pub mod usb;
 pub mod gearbox_control;
 pub mod calbrations;
+pub mod egs_logic_impl;
 
 // -- Interrupt handlers for async APIs --  //
 bind_multiple_interrupts!(struct Sercom6Irqs {
@@ -111,7 +111,6 @@ pub const CAN_ID_DIAG_RX: StandardId = unsafe { StandardId::new_unchecked(0x7E1)
 mod app {
 
     use crate::{
-        can::{CanLayer, CanLayerTy, slave::SlaveCan},
         diag::KwpServer,
         sensors::{AdcData, SensorData, speed_sensors::AllSpeedSensors},
         solenoids::{SolenoidControler, tcc_sol::TccSol},
@@ -119,10 +118,7 @@ mod app {
         usb::UsbData,
     };
     use atsamd_hal::{
-        clock::v2::{pclk, types::Can0},
-        dmac::{self},
-        usb::{UsbBus, usb_device::bus::UsbBusAllocator},
-        watchdog::Watchdog,
+        clock::v2::{pclk, types::Can0}, dmac::{self}, usb::{UsbBus, usb_device::bus::UsbBusAllocator}, watchdog::Watchdog
     };
     use bsp::can_deps::{Capacities, RxDedicated, RxFifo0};
     use diag_common::{
@@ -134,7 +130,8 @@ mod app {
         },
     };
 
-    use mcan::{
+    use egs_logic::egs_can::{self, CanLayerTy};
+use mcan::{
         interrupt::{Interrupt, OwnedInterruptSet, state::EnabledLine0},
         message::Raw,
         messageram::SharedMemory,
@@ -174,9 +171,11 @@ mod app {
         pub wdt: Watchdog,
         pub can_layer: CanLayerTy,
 
-        pub slave_can: SlaveCan,
+        pub slave_can: egs_can::slave::SlaveCan,
         pub soltcc: TccSol,
         pub sensor_data: SensorData,
+
+        pub device_mode: AtomicU16,
 
         pub cpu_idle_ticks: AtomicU32,
         pub hw_interrupts: AtomicU32,
@@ -222,7 +221,7 @@ mod app {
         tasks::performance_monitor(ctx, tps).await;
     }
 
-    #[task(priority = 2, local = [usb_isotp_thread, isotp_thread, diag_server])]
+    #[task(priority = 2, local = [usb_isotp_thread, isotp_thread, diag_server], shared=[&device_mode])]
     async fn diag_task(cx: diag_task::Context) {
         tasks::diag_task(cx).await;
     }
@@ -232,7 +231,7 @@ mod app {
         tasks::sensor_query(cx).await;
     }
 
-    #[task(priority = 2, shared=[can_layer, slave_can, soltcc, sensor_data])]
+    #[task(priority = 2, shared=[can_layer, slave_can, soltcc, sensor_data, &device_mode])]
     async fn gearbox_task(
         cx: gearbox_task::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
@@ -265,6 +264,8 @@ mod app {
     #[unsafe(link_section = ".data.can0")]
     fn can0(mut cx: can0::Context) {
         let buf = cx.local.buf;
+        let now_ms = Mono::now().duration_since_epoch().to_millis() as u32;
+        use egs_logic::egs_can::CanLayer;
         for interrupt in cx.local.can0_interrupts.iter_flagged() {
             match interrupt {
                 Interrupt::MessageStoredToDedicatedRxBuffer => {
@@ -274,10 +275,10 @@ mod app {
                         } else {
                             buf[0..msg.dlc() as usize].copy_from_slice(msg.data());
                             cx.shared.can_layer.lock(|lck| {
-                                lck.on_frame(msg.id(), &buf);
+                                lck.on_frame(now_ms, msg.id(), msg.dlc(), &buf);
                             });
                             cx.shared.slave_can.lock(|lck| {
-                                lck.on_frame(msg.id(), &buf);
+                                lck.on_frame(now_ms, msg.id(), msg.dlc(), &buf);
                             })
                         }
                     }
@@ -289,10 +290,10 @@ mod app {
                         } else {
                             buf[0..msg.dlc() as usize].copy_from_slice(msg.data());
                             cx.shared.can_layer.lock(|lck| {
-                                lck.on_frame(msg.id(), &buf);
+                                lck.on_frame(now_ms, msg.id(), msg.dlc(), &buf);
                             });
                             cx.shared.slave_can.lock(|lck| {
-                                lck.on_frame(msg.id(), &buf);
+                                lck.on_frame(now_ms, msg.id(), msg.dlc(), &buf);
                             })
                         }
                     }

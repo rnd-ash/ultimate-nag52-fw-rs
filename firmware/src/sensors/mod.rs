@@ -8,18 +8,20 @@ use atsamd_hal::{
         v2::{
             apb::ApbClk,
             gclk::GclkId,
-            pclk::{Pclk},
+            pclk::Pclk,
         },
     },
-    pac::{self, Supc},
+    pac::{self, Supc, generic::Safe},
 };
 
+use defmt::println;
+use egs_maths::maps::{Safei32, TupleMap};
 use futures::join;
 
 use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
 use crate::{Adc0Irqs, Adc1Irqs};
 
-use maths;
+use egs_maths;
 
 pub mod adc;
 pub mod speed_sensors;
@@ -122,14 +124,14 @@ impl AdcData {
         // Process the results
         //println!("{:?}", var_res);
         // PCB Temperature sensors
-        let temp_tle8242 = maths::interp(adc0_res.tsen_tle82423 as i32, &TSEN_LOOKUP);
-        let temp_pcb = maths::interp(adc0_res.tsen_pcb as i32, &TSEN_LOOKUP);
+        let temp_tle8242 = TSEN_LOOKUP_MAP.interp_1d(adc0_res.tsen_tle82423);
+        let temp_pcb = TSEN_LOOKUP_MAP.interp_1d(adc0_res.tsen_pcb);
 
         // Parking lock / ATF Temperature
         let tft = if adc1_res.tft > 4090 {
             TftState::Pll
         } else {
-            let temp = maths::interp(adc1_res.tft as i32, &TFT_LOOKUP);
+            let temp = TFT_LOOKUP_MAP.interp_1d(adc1_res.tft);
             TftState::Temperature(temp as i8)
         };
 
@@ -141,7 +143,7 @@ impl AdcData {
             0
         } else {
             let reading_mv = (adc1_res.pmon_kl87_diag as f32 / 4095.0) * 3.3;
-            let scale = maths::interp(temp_pcb, BTS_DIV_TEMP) as f32;
+            let scale = BTS_DIV_TEMP_MAP.interp_1d(temp_pcb);
             (reading_mv * scale) as u16
         };
 
@@ -157,79 +159,89 @@ impl AdcData {
     }
 }
 
-const MAX_ADC_VAL: u16 = 4095;
-
-const fn tft_resistance_to_adc_12bit(r1: u32, r_tsen: u32, temp: i16) -> (i32, i32) {
-    (
-        ((MAX_ADC_VAL as u32 * r_tsen) / (r1 + r_tsen)) as i32,
-        temp as i32,
-    )
+macro_rules! tft_resistance_to_adc_val {
+    ($pullup: ident, $r_sense: literal, $output_temp: literal) => {
+        (
+            Safei32::new::<{(4095 * $r_sense)/($pullup + $r_sense)}>(),
+            Safei32::new::<$output_temp>(),
+        )    
+    };
 }
 
 // https://www.nxp.com/docs/en/data-sheet/KTY83_SER.pdf
 // KTY83/110
 // ADC Value, Temperature
-const PULLUP_TFT_SENSOR: u32 = 2000; // Ohms
-const TFT_LOOKUP: &[(i32, i32)] = &[
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 500, -55),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 525, -50),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 525, -50),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 577, -40),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 632, -30),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 691, -20),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 754, -10),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 820, 0),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 889, 10),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 962, 20),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1000, 25),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1039, 30),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1118, 40),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1202, 50),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1288, 60),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1379, 70),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1472, 80),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1569, 90),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1670, 100),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1774, 110),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1882, 120),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1937, 125),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 1993, 130),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2107, 140),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2225, 150),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2346, 160),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2471, 170),
-    tft_resistance_to_adc_12bit(PULLUP_TFT_SENSOR, 2535, 175),
-];
+const PULLUP_TFT_SENSOR: i32 = 2000; // Ohms
+const TFT_LOOKUP_MAP: TupleMap<'static, Safei32, Safei32, 28> = {
+    const TFT_LOOKUP: [(Safei32, Safei32); 28] = [
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 500, -55),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 525, -50),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 525, -50),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 577, -40),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 632, -30),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 691, -20),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 754, -10),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 820, 0),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 889, 10),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 962, 20),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1000, 25),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1039, 30),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1118, 40),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1202, 50),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1288, 60),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1379, 70),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1472, 80),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1569, 90),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1670, 100),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1774, 110),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1882, 120),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1937, 125),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 1993, 130),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 2107, 140),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 2225, 150),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 2346, 160),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 2471, 170),
+        tft_resistance_to_adc_val!(PULLUP_TFT_SENSOR, 2535, 175),
+    ];
+    TupleMap::new(&TFT_LOOKUP)
+};
 
 // https://www.nxp.com/docs/en/data-sheet/KTY83_SER.pdf
 // TDK NTCG 0402
 // ADC Value, Temperature
-const PULLUP_PCB_SENSOR: u32 = 12000; // Ohms
-const TSEN_LOOKUP: &[(i32, i32)] = &[
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 534, 125),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 599, 120),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 760, 110),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 975, 100),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 1267, 90),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 1668, 80),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 2227, 70),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 3019, 60),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 4158, 50),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 5826, 40),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 6942, 35),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 8312, 30),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 10000, 25),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 12090, 20),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 14700, 15),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 17960, 10),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 22070, 5),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 27280, 0),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 33930, -5),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 42450, -10),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 67790, -20),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 111300, -30),
-    tft_resistance_to_adc_12bit(PULLUP_PCB_SENSOR, 188500, -40),
-];
+const PULLUP_PCB_SENSOR: i32 = 12000; // Ohms
+
+const TSEN_LOOKUP_MAP: TupleMap<'static, Safei32, Safei32, 23> = {
+    const TSEN_LOOKUP: [(Safei32, Safei32); 23] = [
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 534, 125),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 599, 120),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 760, 110),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 975, 100),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 1267, 90),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 1668, 80),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 2227, 70),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 3019, 60),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 4158, 50),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 5826, 40),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 6942, 35),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 8312, 30),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 10000, 25),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 12090, 20),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 14700, 15),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 17960, 10),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 22070, 5),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 27280, 0),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 33930, -5),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 42450, -10),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 67790, -20),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 111300, -30),
+        tft_resistance_to_adc_val!(PULLUP_PCB_SENSOR, 188500, -40),
+    ];
+    TupleMap::new(&TSEN_LOOKUP)
+};
 
 /// BTS6143D voltage divider based on temperature (See datasheet)
-const BTS_DIV_TEMP: &[(i32, i32)] = &[(-40, 10_000), (25, 9700), (150, 9300)];
+const BTS_DIV_TEMP_MAP: TupleMap<'static, i16, u16, 3> = {
+    const BTS_DIV_TEMP: [(i16, u16); 3] = [(-40, 10_000), (25, 9700), (150, 9300)];
+    TupleMap::new(&BTS_DIV_TEMP)
+};

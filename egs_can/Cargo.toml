@@ -1,0 +1,14 @@
+[package]
+name = "egs_can"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bitbybit = "2.0.0"
+arbitrary-int = "2.0.0"
+embedded-can = "0.4.1"
+defmt = {workspace = true}
+nb = "1.1.0"
+
+[build-dependencies]
+candb_codegen = { path = "../candb_codegen" }

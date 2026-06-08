@@ -1,7 +1,5 @@
 use std::{fs, path::PathBuf};
 
-use convert_case::{Case, Casing};
-
 use crate::code_gen::CodeGenerator;
 
 pub(crate) mod code_gen;

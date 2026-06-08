@@ -1,0 +1,346 @@
+#![no_std]
+
+mod can_matrix;
+
+use arbitrary_int::traits::{BuiltinInteger, UnsignedInteger};
+pub use can_matrix::*;
+use embedded_can::StandardId;
+
+use crate::egs52::Egs52Can;
+
+pub mod egs52;
+pub mod slave;
+
+/// Rx frame with timeout
+///
+/// ECU uses these to verify that the
+/// CAN data is not stagnent
+#[derive(Copy, Clone)]
+pub struct RxFrame<T: SignalFrame> {
+    /// Stored as Some(T) if message length
+    /// is correct, otherwise
+    frame: CanResult<T>,
+    timestamp_ms: u32,
+    seen: bool,
+}
+/// Creates a default [RxFrame]
+#[macro_export]
+macro_rules! rxframe_default {
+    ($frame_ty:ident) => {
+        crate::RxFrame::<$frame_ty> {
+            frame: Err(CanError::MissingMsg),
+            timestamp_ms: 0,
+            seen: false,
+        }
+    };
+}
+
+impl<T: SignalFrame> RxFrame<T>
+where
+    T: Copy + Clone,
+{
+    /// Returns [None] if the frame has never been seen on the bus, or is stagnent
+    /// otherwise, returns the CAN frame
+    pub fn get(&self, max_ms: u32, now_ms: u32) -> CanResult<T> {
+        if self.seen {
+            if now_ms - self.timestamp_ms > max_ms {
+                Err(CanError::MissingMsg)
+            } else {
+                self.frame
+            }
+        } else {
+            Err(CanError::MissingMsg)
+        }
+    }
+
+    /// Logs a new incomming frame
+    pub fn write(&mut self, v: CanResult<T>, now_ms: u32) {
+        self.seen = true;
+        self.frame = v;
+        self.timestamp_ms = now_ms
+    }
+
+    /// Returns true if the frame has been seen on the bus at some point
+    /// in the past
+    pub fn has_been_seen(&self) -> bool {
+        self.seen
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub enum CanError {
+    Unsupported,
+    #[default]
+    MissingMsg,
+    InvalidFrameLen,
+    SignalInvalid,
+}
+
+// Logic so that Invalid CAN Enums get thrown as SignalInvalid errors.
+// The type here is returned by bitbybit if an enum was not valid
+impl<T: UnsignedInteger + BuiltinInteger, const N: usize> From<arbitrary_int::UInt<T, N>>
+    for CanError
+{
+    fn from(_value: arbitrary_int::UInt<T, N>) -> Self {
+        Self::SignalInvalid
+    }
+}
+
+pub type CanResult<T> = core::result::Result<T, CanError>;
+
+pub trait CanLayer<I, O> {
+    fn filters(&self) -> &[StandardId] {
+        &[]
+    }
+    fn on_frame(&mut self, now_ms: u32, id: embedded_can::Id, dlc: u8, data: &[u8; 8]);
+    fn read_signals(&self, now_ms: u32, dest: &mut O);
+    fn write_signals(&mut self, sigs: &I);
+    fn transmit<E, F: FnMut(StandardId, &[u8]) -> nb::Result<(), E>>(
+        &self,
+        f: F,
+    ) -> nb::Result<(), E>;
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CanTargGear {
+    N,
+    _1,
+    _2,
+    _3,
+    _4,
+    _5,
+    _6,
+    _7,
+    R,
+    R2,
+    P,
+    Abort,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ShifterPosSimple {
+    P,
+    R,
+    N,
+    D,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TipTronicShifterPos {
+    P,
+    R,
+    N,
+    D,
+    ND,
+    NR,
+    PR,
+    Plus,
+    Minus,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ShiftPaddlePos {
+    None,
+    Plus,
+    Both,
+    Minus,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CanActualGear {
+    N,
+    _1,
+    _2,
+    _3,
+    _4,
+    _5,
+    _6,
+    _7,
+    R,
+    R2,
+    P,
+    PowerFree,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DisplayGear {
+    Blank,
+    _1,
+    _2,
+    _3,
+    _4,
+    _5,
+    _6,
+    _7,
+    A,
+    F,
+    N,
+    P,
+    R,
+}
+
+#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DisplayProfile {
+    A,
+    C,
+    R,
+    F,
+    M,
+    S,
+    W,
+    Underscore,
+    #[default]
+    Blank,
+    Upshift,
+    Downshift,
+}
+
+#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TccState {
+    #[default]
+    Open,
+    OpenSlipping,
+    SlippingOpen,
+    Slipping,
+    SlippingClosed,
+    ClosedSlipping,
+    Closed,
+}
+
+#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgileMode {
+    Sports,
+    Comfort,
+    Unknown,
+    #[default]
+    Snv,
+}
+
+#[derive(Copy, Clone)]
+pub struct TorqueRequest {
+    pub amount_nm: f32,
+    pub ramp_end: bool,
+}
+
+#[derive(Copy, Clone)]
+pub enum CanLayerTy {
+    Egs52(Egs52Can),
+}
+
+impl CanLayerTy {
+    fn as_can_layer(&self) -> &impl CanLayer<CanTxData, CanRxData> {
+        match self {
+            CanLayerTy::Egs52(egs52_can) => egs52_can,
+        }
+    }
+
+    fn as_can_layer_mut(&mut self) -> &mut impl CanLayer<CanTxData, CanRxData> {
+        match self {
+            CanLayerTy::Egs52(egs52_can) => egs52_can,
+        }
+    }
+
+    pub fn filters(&self) -> &[StandardId] {
+        self.as_can_layer().filters()
+    }
+
+    pub fn on_frame(&mut self, now_ms: u32, id: embedded_can::Id, dlc: u8, data: &[u8; 8]) {
+        self.as_can_layer_mut().on_frame(now_ms, id, dlc, data);
+    }
+
+    pub fn read_signals(&self, now_ms: u32, dest: &mut CanRxData) {
+        self.as_can_layer().read_signals(now_ms, dest);
+    }
+
+    pub fn write_signals(&mut self, sigs: &CanTxData) {
+        self.as_can_layer_mut().write_signals(sigs);
+    }
+
+    pub fn transmit<E, F: FnMut(StandardId, &[u8]) -> nb::Result<(), E>>(
+        &self,
+        f: F,
+    ) -> nb::Result<(), E> {
+        self.as_can_layer().transmit(f)
+    }
+}
+
+/// Data that is sent over CAN to the vehicle
+#[derive(Default, Copy, Clone)]
+pub struct CanTxData {
+    pub can_start: bool,
+    pub gearbox_ok: bool,
+    pub manual_shifting: bool,
+    pub high_resistance: bool,
+    pub garage_shifting: bool,
+    pub overtemperature: bool,
+    pub kickdown_active: bool,
+    pub req_mil_light: bool,
+    pub fourmatic: bool,
+    pub large_nag: bool,
+    pub activate_brake_when_shifting: bool,
+
+    pub display_info: Option<(DisplayGear, DisplayProfile)>,
+    pub gear_info: Option<(CanTargGear, CanActualGear)>,
+    pub shifter_pos: Option<ShifterPosSimple>,
+    pub tcc_position: TccState,
+    pub torque_req: Option<TorqueRequest>,
+    pub agile_mode: AgileMode,
+    pub creep_torque_nm: u16,
+    pub loss_torque_nm: u8,
+    pub input_rpm: u16,
+    pub output_rpm: u16,
+    pub gearbox_temperature_c: i16,
+}
+
+#[derive(Copy, Clone)]
+pub struct WheelSpeeds {
+    pub fr: CanResult<u16>,
+    pub fl: CanResult<u16>,
+    pub rr: CanResult<u16>,
+    pub rl: CanResult<u16>,
+}
+
+impl Default for WheelSpeeds {
+    fn default() -> Self {
+        Self {
+            fr: Err(CanError::MissingMsg),
+            fl: Err(CanError::MissingMsg),
+            rr: Err(CanError::MissingMsg),
+            rl: Err(CanError::MissingMsg),
+        }
+    }
+}
+
+/// Data that is received over CAN from the vehicle
+#[derive(Copy, Clone)]
+pub struct CanRxData {
+    pub engine_rpm: CanResult<u16>,
+    pub wheel_speeds: WheelSpeeds,
+    pub ewm_position: CanResult<TipTronicShifterPos>,
+    pub pedal_pos: CanResult<u8>,
+    pub kickdown: CanResult<bool>,
+    pub oil_temperature_c: CanResult<i16>,
+    pub coolant_temperature_c: CanResult<i16>,
+    pub intake_temperature_c: CanResult<i16>,
+    pub driver_demand_torque_nm: CanResult<f32>,
+    pub engine_static_torque_nm: CanResult<f32>,
+    pub engine_indicated_torque_nm: CanResult<f32>,
+}
+
+impl Default for CanRxData {
+    fn default() -> Self {
+        Self {
+            engine_rpm: Err(CanError::MissingMsg),
+            wheel_speeds: Default::default(),
+            ewm_position: Err(CanError::MissingMsg),
+            pedal_pos: Err(CanError::MissingMsg),
+            kickdown: Err(CanError::MissingMsg),
+            oil_temperature_c: Err(CanError::MissingMsg),
+            coolant_temperature_c: Err(CanError::MissingMsg),
+            intake_temperature_c: Err(CanError::MissingMsg),
+            driver_demand_torque_nm: Err(CanError::MissingMsg),
+            engine_static_torque_nm: Err(CanError::MissingMsg),
+            engine_indicated_torque_nm: Err(CanError::MissingMsg),
+        }
+    }
+}

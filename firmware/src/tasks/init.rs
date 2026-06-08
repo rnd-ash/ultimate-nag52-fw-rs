@@ -1,11 +1,7 @@
 use core::sync::atomic::AtomicU32;
 
-use crate::can::CanLayerTy;
-use crate::can::data::SignalFrame;
-use crate::can::egs52::Egs52Can;
-use crate::can::slave::{self, SlaveCan};
 use crate::diag::KwpServer;
-use crate::hal_extension::{self, evsys};
+use crate::hal_extension::{evsys};
 use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
 use crate::sensors::speed_sensors::{AllSpeedSensors, IntN2RpmPc, IntN3RpmPc, init_speed_sensor};
 use crate::sensors::variable_adc_input::VariableAdcInput;
@@ -49,9 +45,13 @@ use diag_common::hal_extensions::dsu::Dsu;
 use diag_common::isotp_endpoints::can_isotp::make_isotp_endpoint;
 use diag_common::isotp_endpoints::usb_isotp::new_usb_isotp;
 use diag_common::smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info};
+use egs_logic::egs_can::{CanLayerTy, SignalFrame, slave_mode};
+use egs_logic::egs_can::egs52::Egs52Can;
+use egs_logic::egs_can::slave::SlaveCan;
 use heapless::format;
 use mcan::embedded_can::{Id, StandardId};
 use rtic_sync::arbiter::Arbiter;
+use rtic_sync::portable_atomic::AtomicU16;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 use mcan::filter::Filter as McanFilter;
@@ -333,7 +333,8 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
         device.can0,
     );
 
-    let can_layer = CanLayerTy::Egs52(Egs52Can::new());
+    let slave_layer = SlaveCan::default();
+    let can_layer = CanLayerTy::Egs52(Egs52Can::default());
 
     let mut can0_cfg =
         mcan::bus::CanConfigurable::new(HertzU32::Hz(500_000), can0_deps, cx.local.message_ram)
@@ -352,7 +353,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
         .filters_standard()
         .push(McanFilter::Classic {
             action: mcan::filter::Action::StoreFifo0,
-            filter: slave::SolenoidControl::CAN_ID,
+            filter: slave_mode::SolenoidControl::CAN_ID,
             mask: StandardId::MAX,
         })
         .ok();
@@ -362,15 +363,14 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             .filters_standard()
             .push(McanFilter::Classic {
                 action: mcan::filter::Action::StoreFifo0,
-                filter: filter.id,
-                mask: filter.mask,
+                filter: *filter,
+                mask: StandardId::MAX,
             })
             .is_err()
         {
             panic!(
-                "Could not allocate CAN Filter for (ID: 0x{:04X}, MSK: 0x{:04X})",
-                filter.id.as_raw(),
-                filter.mask.as_raw()
+                "Could not allocate CAN Filter for (ID: 0x{:04X})",
+                filter.as_raw(),
             );
         }
     }
@@ -471,12 +471,13 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             usb_data,
             wdt,
             can_layer,
-            slave_can: SlaveCan::new(),
+            slave_can: slave_layer,
             soltcc: sol_tcc,
             sensor_data: SensorData::default(),
             cpu_idle_ticks: AtomicU32::new(0),
             hw_interrupts: AtomicU32::new(0),
             wakeups: AtomicU32::new(0),
+            device_mode: AtomicU16::new(0),
             dsu,
         },
         Resources {
