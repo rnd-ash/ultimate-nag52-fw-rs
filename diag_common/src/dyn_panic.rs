@@ -51,15 +51,21 @@ pub struct DynAppPanicMsg {
 
 impl Default for DynAppPanicMsg {
     fn default() -> Self {
-        Self { buf: [0; PANIC_MSG_BUF_SIZE] }
+        Self {
+            buf: [0; PANIC_MSG_BUF_SIZE],
+        }
     }
 }
 
 impl core::fmt::Write for DynAppPanicMsg {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let pos = self.buf.iter().position(|x| *x == 0).unwrap_or(PANIC_MSG_BUF_SIZE-1);
+        let pos = self
+            .buf
+            .iter()
+            .position(|x| *x == 0)
+            .unwrap_or(PANIC_MSG_BUF_SIZE - 1);
         //defmt::info!("{}  - {}", pos, s);
-        let maximum = core::cmp::min(PANIC_MSG_BUF_SIZE-1 - pos, s.len());
+        let maximum = core::cmp::min(PANIC_MSG_BUF_SIZE - 1 - pos, s.len());
         self.buf[pos..pos + maximum].copy_from_slice(&s.as_bytes()[..maximum]);
         self.buf[pos + maximum] = 0;
         Ok(())
@@ -67,8 +73,6 @@ impl core::fmt::Write for DynAppPanicMsg {
 }
 
 impl DynAppPanicMsg {
-
-
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {
             let cstr = CStr::from_bytes_with_nul_unchecked(&self.buf);

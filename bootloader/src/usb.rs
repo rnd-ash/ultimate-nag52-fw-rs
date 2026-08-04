@@ -1,6 +1,6 @@
 use atsamd_hal::usb::{
-    usb_device::device::{UsbDevice, UsbDeviceState},
     UsbBus,
+    usb_device::device::{UsbDevice, UsbDeviceState},
 };
 use bsp::LedUsb;
 use diag_common::isotp_endpoints::usb_isotp::UsbIsoTpInterruptHandler;

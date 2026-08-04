@@ -1,7 +1,8 @@
 use core::sync::atomic::AtomicU32;
 
-use crate::diag::KwpServer;
-use crate::hal_extension::{evsys};
+use crate::diag::{KwpServer, PerfStatsTracker};
+use crate::egs_logic_impl::TickCounter;
+use crate::hal_extension::evsys;
 use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
 use crate::sensors::speed_sensors::{AllSpeedSensors, IntN2RpmPc, IntN3RpmPc, init_speed_sensor};
 use crate::sensors::variable_adc_input::VariableAdcInput;
@@ -34,20 +35,22 @@ use atsamd_hal::nvm::smart_eeprom::SmartEepromMode;
 use atsamd_hal::prelude::_atsamd_hal_embedded_hal_digital_v2_OutputPin;
 use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::serial_number;
+use atsamd_hal::timer::TimerCounter7;
 use atsamd_hal::usb::UsbBus;
 use atsamd_hal::usb::usb_device::bus::UsbBusAllocator;
 use atsamd_hal::usb::usb_device::device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid};
 use atsamd_hal::watchdog::Watchdog;
 use bsp::can_deps::{self, Capacities};
 use cortex_m::prelude::_embedded_hal_watchdog_Watchdog;
-use diag_common::{DefmtTarget, defmt_multi_output};
 use diag_common::hal_extensions::dsu::Dsu;
 use diag_common::isotp_endpoints::can_isotp::make_isotp_endpoint;
 use diag_common::isotp_endpoints::usb_isotp::new_usb_isotp;
 use diag_common::smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info};
-use egs_logic::egs_can::{CanLayerTy, SignalFrame, slave_mode};
+use diag_common::{DefmtTarget, defmt_multi_output};
+use egs_logic::GearboxOutputs;
 use egs_logic::egs_can::egs52::Egs52Can;
 use egs_logic::egs_can::slave::SlaveCan;
+use egs_logic::egs_can::{CanLayerTy, SignalFrame, slave_mode};
 use heapless::format;
 use mcan::embedded_can::{Id, StandardId};
 use rtic_sync::arbiter::Arbiter;
@@ -90,7 +93,8 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
     //     │   ├── DPLL0(100Mhz)
     //     C   │   └── GCLK0(100Mhz)
     //     L   │       ├── TCC2 (TCC Solenoid)
-    //     K   │       └── F_CPU
+    //     K   │       ├── TC7 (HPET Timer)
+    //     │   │       └── F_CPU
     //     │   │           └── QSPI
     //     R   └── DPLL1(160Mhz)
     //     E       ├── GCLK2(40Mhz)
@@ -112,7 +116,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
     // DPLL0 loop div 50 = 100Mhz
     // DPLL1 loop div 80 = 160Mhz
     let (clk_dpll0, gclk1) = Pclk::enable(tokens.pclks.dpll0, gclk1);
-    let (clk_dpll1, _gclk1) = Pclk::enable(tokens.pclks.dpll1, gclk1);
+    let (clk_dpll1, gclk1) = Pclk::enable(tokens.pclks.dpll1, gclk1);
     // DPLL0 at 100Mhz (2*50)
     let dpll0 = Dpll::from_pclk(tokens.dpll0, clk_dpll0)
         .loop_div(50, 0)
@@ -217,6 +221,10 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
     let dma_ch0 = dma_channels.0.init(PriorityLevel::Lvl0); // TLE8242 SPI
     let dma_ch1 = dma_channels.1.init(PriorityLevel::Lvl0); // TLE8242 SPI
     let dma_ch2 = dma_channels.2.init(PriorityLevel::Lvl0); // EEPROM I2C
+
+    let (tc67_clock, gclk0_100) = Pclk::enable(tokens.pclks.tc6_tc7, gclk0_100);
+    let apb_tc7 = buses.apb.enable(tokens.apbs.tc7);
+    let hpet = TickCounter::new();
 
     let (tcc01_clock, _gclk4_160) = Pclk::enable(tokens.pclks.tcc0_tcc1, gclk4_160);
     let tcc01_clock_compat = tcc01_clock.into();
@@ -422,7 +430,6 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
         .insert(Arbiter::new(SerialPort::new(usb_alloc)));
     // Configure and setup loggers
     defmt_multi_output::set_defmt_serial_logger(uart);
-    
 
     let mut smart_eeprom = match nvm.smart_eeprom().unwrap() {
         SmartEepromMode::Locked(smart_eeprom) => smart_eeprom.unlock(),
@@ -432,10 +439,9 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
     let defmt_ep = match seeprom_info.defmt_ep {
         0x01 => DefmtTarget::Can,
         0x02 => DefmtTarget::Serial,
-        _ => DefmtTarget::Rtt
+        _ => DefmtTarget::Rtt,
     };
     let _ = defmt_multi_output::set_defmt_log_mode(defmt_ep);
-
 
     // Write down the device serial number in ASCII form
     let sn = serial_number();
@@ -461,6 +467,8 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
         isotp: isotp_usb_tx,
     };
 
+    // Start HPET
+
     app::async_init::spawn(dsu, arbiter_cantx, eeprom, solenoid_io)
         .unwrap_or_else(|_| panic!("Could not start async init"));
     app::perf_monitor::spawn(gclk0_100.freq().raw()).unwrap();
@@ -479,6 +487,8 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             wakeups: AtomicU32::new(0),
             device_mode: AtomicU16::new(0),
             dsu,
+            perf_stats: PerfStatsTracker::default(),
+            outputs: GearboxOutputs::default(),
         },
         Resources {
             adc_data,
@@ -489,8 +499,8 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             isotp_isr,
             isotp_thread,
             usb_isotp_thread: isotp_usb_thread,
-
             diag_server: KwpServer::new(dsu),
+            hpet,
         },
     )
 }

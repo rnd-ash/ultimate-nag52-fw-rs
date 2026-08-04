@@ -1,7 +1,7 @@
 //! Wrapper around EIC Channel from atsamd_hal crate
 //! that can work with the Event system implementation
 
-use core::{ops::{Deref, DerefMut}};
+use core::ops::{Deref, DerefMut};
 
 use atsamd_hal::{
     eic::{ChId as EvChId, EicPin},
@@ -53,7 +53,6 @@ where
         // atsamd crate enables the EIC channel event wrongly (Doesn't disable EIC first)
         // so we must do it manually here
 
-        
         let eic = unsafe { Peripherals::steal().eic };
         // Turn off the EIC peripheral
         eic.ctrla().modify(|_, w| w.enable().clear_bit());
@@ -61,9 +60,8 @@ where
             core::hint::spin_loop();
         }
         // Set the appropriate event system bit
-        eic.evctrl().modify(|r, w| unsafe {
-            w.extinteo().bits(r.extinteo().bits() | (1 << P::ChId::ID))
-        });
+        eic.evctrl()
+            .modify(|r, w| unsafe { w.extinteo().bits(r.extinteo().bits() | (1 << P::ChId::ID)) });
 
         // Re-enable the EIC peripheral
         eic.ctrla().modify(|_, w| w.enable().set_bit());

@@ -1,11 +1,22 @@
 use atsamd_hal::{fugit::ExtU64, pac::SCB, rtic_time::Monotonic};
 use automotive_diag::kwp2000::{KwpCommand, KwpError, KwpSessionType};
 use diag_common::{DefmtTarget, defmt_multi_output, hal_extensions::dsu::Dsu, ram_info};
+use rtic::Mutex;
 use rtic_sync::arbiter::Arbiter;
 
 pub mod dev_mode;
 
-use crate::Mono;
+use crate::{Mono, app::diag_task};
+
+#[derive(Copy, Clone, Default)]
+pub struct PerfStatsTracker {
+    pub cpu_percentage: u16,
+    pub hw_interrupts: u16,
+    pub wakeups: u16,
+    pub us_input_funcs: u16,
+    pub us_process_func: u16,
+    pub us_output_funcs: u16,
+}
 
 #[derive(Copy, Clone)]
 pub enum PendingOp {
@@ -45,10 +56,16 @@ impl KwpServer {
         1 + data.len()
     }
 
-    pub async fn process_cmd(&mut self, cmd: &[u8], _now_ms: u64) -> &[u8] {
+    pub async fn process_cmd(
+        &mut self,
+        cmd: &[u8],
+        _now_ms: u64,
+        shared: &mut diag_task::SharedResources<'_>,
+    ) -> &[u8] {
         self.last_cmd_time = Mono::now().duration_since_epoch().to_millis();
         let r = match KwpCommand::try_from(cmd[0]).ok() {
             Some(KwpCommand::StartDiagnosticSession) => self.start_diag_session(cmd).await,
+            Some(KwpCommand::ReadDataByLocalIdentifier) => self.read_data_local(cmd, shared).await,
             Some(KwpCommand::InputOutputControlByLocalIdentifier) => self.ioctl(cmd).await,
             _ => Err(KwpError::ServiceNotSupported),
         };
@@ -57,9 +74,50 @@ impl KwpServer {
         &self.buf[..reply_len]
     }
 
+    async fn read_data_local(
+        &mut self,
+        cmd: &[u8],
+        shared: &mut diag_task::SharedResources<'_>,
+    ) -> ServerResult {
+        if cmd.len() != 2 {
+            return Err(KwpError::SubFunctionNotSupportedInvalidFormat);
+        }
+        match cmd[1] {
+            0x00 => {
+                let mut resp = [0; 13];
+                resp[0] = 0x00;
+                shared.perf_stats.lock(|lck| {
+                    resp[1..3].copy_from_slice(&lck.cpu_percentage.to_be_bytes());
+                    resp[3..5].copy_from_slice(&lck.wakeups.to_be_bytes());
+                    resp[5..7].copy_from_slice(&lck.hw_interrupts.to_be_bytes());
+
+                    resp[7..9].copy_from_slice(&lck.us_input_funcs.to_be_bytes());
+                    resp[9..11].copy_from_slice(&lck.us_process_func.to_be_bytes());
+                    resp[11..13].copy_from_slice(&lck.us_output_funcs.to_be_bytes());
+                });
+
+                Ok(self.make_positive_reply(cmd[0], &resp))
+            }
+            0x01 => {
+                let mut resp = [0; 9];
+                resp[0] = 0x01;
+
+                shared.outputs.lock(|lck| {
+                    resp[1..3].copy_from_slice(&lck.diag_mpc_pressure.to_be_bytes());
+                    resp[3..5].copy_from_slice(&lck.diag_spc_pressure.to_be_bytes());
+                    resp[5..7].copy_from_slice(&lck.mpc_current.to_be_bytes());
+                    resp[7..9].copy_from_slice(&lck.spc_current.to_be_bytes());
+                });
+
+                Ok(self.make_positive_reply(cmd[0], &resp))
+            }
+            _ => Err(KwpError::SubFunctionNotSupportedInvalidFormat),
+        }
+    }
+
     async fn ioctl(&mut self, cmd: &[u8]) -> ServerResult {
         if cmd.len() < 3 {
-            return Err(KwpError::SubFunctionNotSupportedInvalidFormat)
+            return Err(KwpError::SubFunctionNotSupportedInvalidFormat);
         }
         match cmd[1] {
             // IOCTL ID
@@ -78,7 +136,7 @@ impl KwpServer {
                     0x01 => {
                         let log_ty = defmt_multi_output::get_current_defmt_log_mode() as u8;
                         Ok(self.make_positive_reply(cmd[0], &[0xF0, 0x01, log_ty]))
-                    },
+                    }
                     0x07 | 0x08 => {
                         if cmd.len() != 4 {
                             Err(KwpError::SubFunctionNotSupportedInvalidFormat)
@@ -98,8 +156,8 @@ impl KwpServer {
                                 Ok(self.make_positive_reply(cmd[0], &[0xF0, cmd[3]]))
                             }
                         }
-                    }, // 0x08 => Long term adjust
-                    _ => Err(KwpError::RequestOutOfRange)
+                    } // 0x08 => Long term adjust
+                    _ => Err(KwpError::RequestOutOfRange),
                 }
             }
             _ => Err(KwpError::SubFunctionNotSupportedInvalidFormat),

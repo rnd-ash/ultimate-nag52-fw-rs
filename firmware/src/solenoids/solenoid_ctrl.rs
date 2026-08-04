@@ -10,11 +10,7 @@ pub struct SolenoidLims {
 
 const fn floor_unsigned(f: f32) -> u16 {
     let ret = (f as u16) as f32;
-    if f < ret {
-        (f - 1.0) as u16
-    } else {
-        f as u16
-    }
+    if f < ret { (f - 1.0) as u16 } else { f as u16 }
 }
 
 #[derive(Copy, Clone, defmt::Format)]

@@ -1,20 +1,14 @@
 use atsamd_hal::{
-    adc::{
-        Accumulation, Adc0, Adc1, AdcBuilder, AdcResolution, FutureAdc,
-        Prescaler, Reference,
-    },
+    adc::{Accumulation, Adc0, Adc1, AdcBuilder, AdcResolution, FutureAdc, Prescaler, Reference},
     clock::{
         self,
-        v2::{
-            apb::ApbClk,
-            gclk::GclkId,
-            pclk::Pclk,
-        },
+        v2::{apb::ApbClk, gclk::GclkId, pclk::Pclk},
     },
     pac::{self, Supc, generic::Safe},
 };
 
 use defmt::println;
+use egs_logic::TftReading;
 use egs_maths::maps::{Safei32, TupleMap};
 use futures::join;
 
@@ -28,18 +22,9 @@ pub mod speed_sensors;
 pub mod variable_adc_input;
 
 #[derive(Default, Copy, Clone)]
-pub enum TftState {
-    /// Parking lock engaged (No temperature)
-    #[default]
-    Pll,
-    // Temperature in Celcius
-    Temperature(i8),
-}
-
-#[derive(Default, Copy, Clone)]
 pub struct SensorData {
     /// TFT Sensor state
-    pub tft: TftState,
+    pub tft: TftReading,
     /// KL15 voltage (mV)
     pub vkl15: u16,
     /// Sensors voltage (mV)
@@ -129,10 +114,10 @@ impl AdcData {
 
         // Parking lock / ATF Temperature
         let tft = if adc1_res.tft > 4090 {
-            TftState::Pll
+            TftReading::ParkOrNeutral
         } else {
             let temp = TFT_LOOKUP_MAP.interp_1d(adc1_res.tft);
-            TftState::Temperature(temp as i8)
+            TftReading::Temperature(temp as i16)
         };
 
         // Power monitors
@@ -162,9 +147,9 @@ impl AdcData {
 macro_rules! tft_resistance_to_adc_val {
     ($pullup: ident, $r_sense: literal, $output_temp: literal) => {
         (
-            Safei32::new::<{(4095 * $r_sense)/($pullup + $r_sense)}>(),
+            Safei32::new::<{ (4095 * $r_sense) / ($pullup + $r_sense) }>(),
             Safei32::new::<$output_temp>(),
-        )    
+        )
     };
 }
 

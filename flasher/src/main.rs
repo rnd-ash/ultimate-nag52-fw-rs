@@ -14,12 +14,11 @@ use color_eyre::{
     owo_colors::OwoColorize,
 };
 use console::style;
-use defmt_decoder::log::{DefmtLoggerType, format::{Formatter, FormatterConfig, HostFormatter}};
 use defmt_parser::Level;
-use diag_common::{BootloaderStayReason, CAN_ID_DEFMT_LOG, smarteeprom::CodeSectionInfo};
+use diag_common::{BootloaderStayReason, smarteeprom::CodeSectionInfo};
 use ecu_diagnostics::{
     DiagError,
-    channel::{IsoTPChannel, IsoTPSettings, Packet, PayloadChannel},
+    channel::{IsoTPChannel, IsoTPSettings, PayloadChannel},
     dynamic_diag::{
         DiagServerBasicOptions, DiagServerEmptyLogger, DynamicDiagSession, TimeoutConfig,
     },
@@ -27,11 +26,12 @@ use ecu_diagnostics::{
     kwp2000::{Kwp2000Protocol, KwpCommand, KwpError, KwpSessionType},
 };
 use elf::abi::PT_LOAD;
+use heatshrink::encoder::HeatshrinkEncoder;
 use indicatif::{
-    FormattedDuration, HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle,
+    HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle,
 };
 use object::{
-    Endianness, Object, ObjectSection, ObjectSymbol, SectionKind,
+    Endianness, Object, ObjectSection, SectionKind,
     elf::FileHeader32,
     read::elf::{FileHeader, ProgramHeader},
 };
@@ -75,9 +75,11 @@ pub enum Command {
         #[clap(long, short)]
         bootloader: Option<PathBuf>,
         #[clap(long)]
-        application: PathBuf,
+        application: Option<PathBuf>,
         #[clap(short)]
         log: bool,
+        #[clap(long)]
+        compress: bool
     },
     /// Read / Dump memory from the TCU to a binary file
     Read {
@@ -374,6 +376,7 @@ fn flash(
     server: &mut DynamicDiagSession,
     fast_mode: bool,
     is_bl: bool,
+    use_compression: bool
 ) -> Result<(), Report> {
     const PRE_END_ADDR: u64 = 1024 * 8;
     const BL_END_ADDR: u64 = 1024 * 128;
@@ -444,7 +447,7 @@ fn flash(
     } else {
         server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
     }
-    std::thread::sleep(Duration::from_millis(1000)); // Allow the MCU to reset to bootloader
+    std::thread::sleep(Duration::from_millis(500)); // Allow the MCU to reset to bootloader
     let spinner = next_spinner(&mp, Some(spinner), 2, 6);
     spinner.set_message(format!(
         "Erasing flash ({} from 0x{:08X})",
@@ -510,12 +513,11 @@ fn flash(
     spinner.set_message("Preparing download");
     let mut download_req = vec![KwpCommand::RequestDownload.into()];
     download_req.extend_from_slice(&(start_address as u32).to_le_bytes());
-    download_req.push(0x00); // Fmt
+    download_req.push(use_compression as u8); // Fmt
     download_req.extend_from_slice(&(array.len() as u32).to_le_bytes());
     server.send_byte_array_with_response(&download_req, None)?;
     let mut counter: u8 = 0;
-    const MAX_COPY: usize = 1024;
-    let mut block = [0; MAX_COPY + 2];
+    let mut block_max = [0; 4096];
     let mut addr = 0;
 
     let spinner = next_spinner(&mp, Some(spinner), 4, 6);
@@ -533,12 +535,27 @@ fn flash(
             .progress_chars("##-"),
         );
     while addr < array.len() {
-        let max_copy = core::cmp::min(MAX_COPY, array.len() - addr);
-        block[0] = KwpCommand::TransferData.into();
-        block[1] = counter;
-        block[2..2 + max_copy].copy_from_slice(&array[addr..addr + max_copy]);
+
+        let block_max_size = if use_compression {
+            2048
+        } else {
+            1024
+        };
+
+        let max_copy = core::cmp::min(block_max_size, array.len() - addr);
+        block_max[0] = KwpCommand::TransferData.into();
+        block_max[1] = counter;
         pb.set_position(addr as u64);
-        server.send_byte_array_with_response(&block[..max_copy + 2], None)?;
+        if use_compression {
+            let out = heatshrink::encoder::encode(&array[addr..addr + max_copy], &mut block_max[2..]).unwrap();
+            let len = out.len();
+            pb.set_message(format!("Ratio {:3.1}%", (out.len() as f32/max_copy as f32)*100.0));
+            server.send_byte_array_with_response(&block_max[..2 + len], None)?;
+            
+        } else {
+            block_max[2..2 + max_copy].copy_from_slice(&array[addr..addr + max_copy]);
+            server.send_byte_array_with_response(&block_max[..max_copy + 2], None)?;
+        }
         addr += max_copy;
         counter = counter.wrapping_add(1);
     }
@@ -565,6 +582,7 @@ fn flash(
     let spinner = next_spinner(&mp, Some(spinner), 6, 6);
     spinner.set_message("Resetting ECU");
     server.send_byte_array_with_response(&[KwpCommand::ECUReset.into(), 0x01], None)?;
+    std::thread::sleep(Duration::from_millis(500)); // Allow the MCU to reset
     spinner.finish_with_message(format!("{} {}", spinner.message(), style("✔").green()));
     Ok(())
 }
@@ -919,7 +937,7 @@ fn main() -> Result<()> {
 
     if let Command::Analyze { file } = args.command.clone() {
         analyze(&file, 1024 * 1024)?;
-        attach_log(&file, args.interface, args.can_iface);
+        attach_log(&file, args.interface, args.can_iface)?;
         return Ok(());
     }
 
@@ -931,41 +949,39 @@ fn main() -> Result<()> {
             bootloader,
             application,
             log,
+            compress
         } => {
-            let has_bootloader = bootloader.is_some();
             if let Some(loader) = bootloader {
                 println!(
                     "{}",
-                    style("Flashing bootloader (Stage 1/2)").bold().green()
+                    style("Flashing bootloader").bold().green()
                 );
-                flash(&mp, loader, &mut server, fast_mode, true)?;
+                flash(&mp, loader, &mut server, fast_mode, true, *compress)?;
             }
             drop(mp);
             mp = MultiProgress::new();
-            if has_bootloader {
+            if let Some(application) = application {
                 println!(
                     "{}",
-                    style("Flashing application (Stage 2/2)").bold().green()
+                    style("Flashing application").bold().green()
                 );
                 // Restart the server to drain buffers etc
                 let _ = server.release();
                 std::thread::sleep(Duration::from_millis(1000));
                 server = create_server(&mut fast_mode, &args, &mut mp).unwrap();
-            } else {
-                println!("{}", style("Flashing application").bold().green());
-            }
-
-            flash(&mp, application, &mut server, fast_mode, false)?;
-            if *log {
-                // Switch to log mode
-                let log_mode = match args.interface {
-                    Interface::Usb => 2,
-                    Interface::Can | Interface::CanFast => 1,
-                };
-                server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
-                server.send_byte_array_with_response(&[0x30, 0xF0, 0x07, log_mode], None)?;
-                drop(server);
-                attach_log(application, args.interface, args.can_iface);
+                flash(&mp, application, &mut server, fast_mode, false, *compress)?;
+                if *log  {
+                    // Switch to log mode
+                    let log_mode = match args.interface {
+                        Interface::Usb => 2,
+                        Interface::Can | Interface::CanFast => 1,
+                    };
+                    server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
+                    server.send_byte_array_with_response(&[0x30, 0xF0, 0x07, log_mode], None)?;
+                    drop(server);
+                    attach_log(application, args.interface, args.can_iface)?;
+                }
+            
             }
             Ok(())
         }

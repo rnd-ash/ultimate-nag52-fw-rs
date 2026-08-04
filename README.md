@@ -108,7 +108,7 @@ This is taken for a nominal boot (No regions are to be flashed). [Comparison YT 
 |TC5|||
 |TC6|||
 |TC7|||
-|TC8|||
+|TC8|✔️|HPET Timer (Software)|
 
 ### SERCOM
 |Peripheral|In use|Usage|

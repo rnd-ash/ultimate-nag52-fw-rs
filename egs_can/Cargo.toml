@@ -5,10 +5,12 @@ edition = "2024"
 
 [dependencies]
 bitbybit = "2.0.0"
-arbitrary-int = "2.0.0"
+arbitrary-int = {version="2.0.0", features = ["num-traits"]}
 embedded-can = "0.4.1"
 defmt = {workspace = true}
 nb = "1.1.0"
+num-traits = {version="0.2.19", default-features = false}
+pastey = "0.2.3"
 
 [build-dependencies]
 candb_codegen = { path = "../candb_codegen" }

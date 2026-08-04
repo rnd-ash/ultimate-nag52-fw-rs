@@ -332,9 +332,9 @@ mod app {
         let (clk_dpll0, _gclk1) = Pclk::enable(tokens.pclks.dpll0, gclk1);
         // DPLL0 at 100Mhz (2*50)
         let dpll0 = Dpll::from_pclk(tokens.dpll0, clk_dpll0)
-            .loop_div(50, 0)
+            .loop_div(60, 0)
             .enable();
-        let (gclk0_100, dfll, _dpll0) = clocks.gclk0.swap_sources(dfll, dpll0);
+        let (gclk0_120, dfll, _dpll0) = clocks.gclk0.swap_sources(dfll, dpll0);
         let (dfll_usb, _old_mode) = dfll.into_mode(FromUsb, |_dfll| {});
         let (gclk2, _dpll0) = Gclk::from_source(tokens.gclks.gclk2, dfll_usb);
         let gclk2_48 = gclk2.enable();
@@ -349,7 +349,7 @@ mod app {
         // -- CAN init --
         let (clk_can, gclk2_48) = Pclk::enable(tokens.pclks.can0, gclk2_48);
         let (can0_deps, _gclk0_100) = Dependencies::new(
-            gclk0_100,
+            gclk0_120,
             clk_can,
             clocks.ahbs.can0,
             pins.can_rx.into_mode(),

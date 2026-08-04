@@ -14,6 +14,7 @@ use atsamd_hal::{
     time::Hertz,
 };
 use bsp::{LedTle, TleClk, TleCs, TleEn, TleFault, TlePhaseSync, TleReset, TleSpiPads};
+use defmt::println;
 
 use crate::{
     Mono,

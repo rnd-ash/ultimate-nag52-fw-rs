@@ -20,6 +20,16 @@ use diag_common::{
     ram_info::modify_bootloader_info,
 };
 
+/// Returns (New value of DWT, Delta ticks)
+pub(crate) fn elapsed_dwt_ticks(old: u32) -> (u32, u32) {
+    let new = DWT::cycle_count();
+    if new > old {
+        (new, new - old)
+    } else {
+        (new, ((old as u64 + u32::MAX as u64) - new as u64) as u32)
+    }
+}
+
 pub fn idle(ctx: &app::idle::Context) -> ! {
     let (mut dwt, mut dcb, nvic) = unsafe {
         let p = cortex_m::Peripherals::steal();
@@ -51,12 +61,13 @@ pub fn idle(ctx: &app::idle::Context) -> ! {
     // so we don't write into the stack
     set_stack_watermark(&mut ram_test_end);
     let mut ram_test_done = false;
+    let mut dwt_count = 0;
+    // Always enable these
+    dcb.enable_trace();
+    dwt.enable_cycle_counter();
     loop {
         // Stop interrupts from context switch
         let (sleep_ticks, pending_isr_count) = cortex_m::interrupt::free(|_| {
-            // Always enable these
-            dcb.enable_trace();
-            dwt.enable_cycle_counter();
             // Wait for something to wake up the CPU
             if !ram_test_done && let Some(mut lock) = ctx.shared.dsu.try_access() {
                 unsafe {
@@ -67,9 +78,9 @@ pub fn idle(ctx: &app::idle::Context) -> ! {
                     let test = lock
                         .polling_memory_test(ram_ptr.addr() as u32, ram_test_size as u32)
                         .unwrap();
-                    dwt.set_cycle_count(0);
+                    let dwt_pre_count = DWT::cycle_count();
                     wfi();
-                    let dwt_count = DWT::cycle_count();
+                    let dwt_count = elapsed_dwt_ticks(dwt_pre_count).1;
                     let test_res = test.finish_now();
                     // Copy ram back
                     ram_test_buf_addr.copy_to(ram_ptr, ram_test_size);
@@ -99,10 +110,10 @@ pub fn idle(ctx: &app::idle::Context) -> ! {
                     )
                 }
             } else {
-                dwt.set_cycle_count(0);
+                let dwt_pre_count = DWT::cycle_count();
                 wfi();
                 (
-                    DWT::cycle_count(),
+                    elapsed_dwt_ticks(dwt_pre_count).1,
                     nvic.ispr.iter().map(|x| x.read().count_ones()).sum(),
                 )
             }

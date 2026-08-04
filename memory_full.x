@@ -9,6 +9,7 @@ MEMORY
   BL_COMM (xrw)   : ORIGIN = 0x20000000 + 2K       , LENGTH = 512
   RAM_TST(rw)     : ORIGIN = 0x20000000 + 2K + 512 , LENGTH = 128  # Buffer for RAM testing
   RAM (xrw)       : ORIGIN = 0x20000000 + 2K + 640 , LENGTH = 256K - 2K - 640
+  LOG_RAM (xrw)   : ORIGIN = 0x47000000            , LENGTH = 8K # Backup SRAM used for logging buffer
 }
 
 SECTIONS {
@@ -26,6 +27,11 @@ SECTIONS {
   {
     *(.ram_test);
   } > RAM_TST
+
+  .log_ram (NOLOAD):
+  {
+    *(.log_ram.*);
+  } > LOG_RAM
 }
 
 _stack_start = ORIGIN(RAM) + LENGTH(RAM);

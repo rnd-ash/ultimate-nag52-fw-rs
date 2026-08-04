@@ -1,6 +1,3 @@
-
-
-
 unsafe extern "C" {
     static mut _ram_test_buffer_addr: u8;
     static mut _ram_test_buffer_end_addr: u8;
@@ -10,8 +7,8 @@ unsafe extern "C" {
 pub fn ram_buf_size() -> usize {
     let start = (&raw mut _ram_test_buffer_addr).addr();
     let end = (&raw mut _ram_test_buffer_end_addr).addr();
-    end-start
-    
+    end - start
+
     //128
 }
 

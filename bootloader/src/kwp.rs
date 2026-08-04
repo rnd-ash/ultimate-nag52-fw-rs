@@ -34,6 +34,7 @@ pub enum PendingOperation {
     Flashing {
         blk_id: u8,
         current_addr: u32,
+        use_compression: bool
     },
 }
 
@@ -624,7 +625,7 @@ impl KwpServer {
             Err(KwpError::SubFunctionNotSupportedInvalidFormat)
         } else {
             // 0..2 -> Address
-            // 3 -> Format (00 is only supported)
+            // 3 -> Format (00 and 01 is supported (Uncompressed, compressed with lz4))
             // 4..8 -> Size
             let mut addr = u32::from_le_bytes(cmd[1..5].try_into().unwrap());
             let fmt = cmd[5];
@@ -633,7 +634,7 @@ impl KwpServer {
 
             if addr == MemoryRegion::Bootloader.start_addr() {
                 addr = MemoryRegion::BootloaderScratch.start_addr();
-            } else if fmt != 0
+            } else if fmt > 1
                 || !app_region.contains(&addr)
                 || !app_region.contains(&(addr + size))
             {
@@ -645,6 +646,7 @@ impl KwpServer {
             self.pending_operation = PendingOperation::Flashing {
                 blk_id: 0,
                 current_addr: addr,
+                use_compression: fmt != 0
             };
             Ok(self.make_positive_reply(cmd[0], &bs))
         }
@@ -654,15 +656,31 @@ impl KwpServer {
         if let PendingOperation::Flashing {
             blk_id,
             current_addr,
+            use_compression
         } = &mut self.pending_operation
         {
             if cmd.len() > 2 {
                 let req_blk_id = cmd[1];
-                let data_size = cmd.len() - 2;
-                if req_blk_id == *blk_id && data_size.is_multiple_of(4) {
+                let mut data_size = cmd.len() - 2;
+                if req_blk_id == *blk_id {
                     let addr = *current_addr as *mut u32;
-                    // Copy to 4 byte aligned array
-                    self.flash_buf[..cmd.len() - 2].copy_from_slice(&cmd[2..]);
+                    if *use_compression {
+                        if let Ok(decoded) = heatshrink::decoder::decode(&cmd[2..], &mut self.flash_buf) {
+                            data_size = decoded.len();
+                            if !data_size.is_multiple_of(4) {
+                                return Err(KwpError::TransferSuspended)?;
+                            }
+                        } else {
+                            defmt::error!("Failed to decode slice");
+                            return Err(KwpError::TransferSuspended)?;
+                        }
+                    } else {
+                        if !data_size.is_multiple_of(4) {
+                            return Err(KwpError::TransferSuspended)?;
+                        }
+                        // Copy to 4 byte aligned array
+                        self.flash_buf[..cmd.len() - 2].copy_from_slice(&cmd[2..]);
+                    }
                     // Write to aligned
                     unsafe {
                         let source: &[u32] = core::slice::from_raw_parts(

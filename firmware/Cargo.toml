@@ -20,37 +20,33 @@ cortex-m = { workspace = true, features = [
 cortex-m-rt.workspace = true
 mcan.workspace = true
 usbd-serial = "0.2.2"
-automotive_diag = { version = "0.1.21", default-features = false, features = [
+automotive_diag = { version = "0.1.28", default-features = false, features = [
     "kwp2000",
 ] }
-rtic-sync = "1.4.0"
+rtic-sync = "1.5.0"
 
 # Format and printing
 defmt.workspace = true
 
 # RTIC
-rtic = { version = "2.2.0", features = ["thumbv7-backend"] }
-heapless = "0.9.1"
+rtic = { version = "2.3.0", features = ["thumbv7-backend"] }
+heapless = "0.9.3"
 
-futures = { version = "0.3.31", default-features = false }
-bitbybit = "2.0.0"
-arbitrary-int = "2.0.0"
-libm = "0.2.15"
-bitflags = "2.9.4"
+futures = { version = "0.3.33", default-features = false }
+bitbybit = "2.0.1"
+arbitrary-int = "2.1.1"
+libm = "0.2.16"
+bitflags = "2.13.1"
 atsamd-hal-macros = "0.3.0"
 seq-macro = "0.3.6"
-pastey = "0.1.1"
+pastey = "0.2.3"
+embedded-alloc = "0.7.0"
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["now"] }
 rustc_version = "0.4.1"
 vergen = { version = "9.1.0" }
 vergen-git2 = { version = "9.1.0" }
-
-[profile.dev]
-incremental = false
-debug = true
-lto = true
 
 [profile.release]
 debug = true

@@ -8,8 +8,11 @@ use embedded_can::StandardId;
 
 use crate::egs52::Egs52Can;
 
+mod bit_checking;
 pub mod egs52;
 pub mod slave;
+
+use pastey::paste;
 
 /// Rx frame with timeout
 ///
@@ -23,16 +26,56 @@ pub struct RxFrame<T: SignalFrame> {
     timestamp_ms: u32,
     seen: bool,
 }
-/// Creates a default [RxFrame]
+
 #[macro_export]
-macro_rules! rxframe_default {
-    ($frame_ty:ident) => {
-        crate::RxFrame::<$frame_ty> {
-            frame: Err(CanError::MissingMsg),
-            timestamp_ms: 0,
-            seen: false,
+macro_rules! make_rx_frames {
+    ($struct_name:ident { $($frame:ident),* }) => {
+        pastey::paste! {
+
+#[derive(Copy, Clone)]
+pub struct $struct_name {
+    $(
+        pub [<$frame:snake>]: crate::RxFrame<$frame>,
+    )*
+}
+
+impl Default for $struct_name {
+    fn default() -> Self {
+        Self {
+            $(
+                [<$frame:snake>]: crate::RxFrame::<$frame> {
+                    frame: Err(CanError::MissingMsg),
+                    timestamp_ms: 0,
+                    seen: false,
+                },
+            )*
         }
-    };
+    }
+}
+
+impl $struct_name {
+    #[inline(always)]
+    pub const fn filters() -> &'static [embedded_can::StandardId] {
+        &[$(
+            [<$frame>]::CAN_ID,
+        )*]
+    }
+
+    #[inline(always)]
+    pub fn on_rx_frame(&mut self, now_ms: u32, id: embedded_can::Id, dlc: u8, data: &[u8; 8]) {
+        match id {
+            $(
+                embedded_can::Id::Standard([<$frame>]::CAN_ID) => {
+                    self.[<$frame:snake>].write([<$frame>]::from_can_msg(dlc, data), now_ms)
+                }
+            )*
+            _ => {}
+        }
+    }
+}
+        
+        }
+    }
 }
 
 impl<T: SignalFrame> RxFrame<T>
@@ -94,7 +137,7 @@ pub trait CanLayer<I, O> {
     }
     fn on_frame(&mut self, now_ms: u32, id: embedded_can::Id, dlc: u8, data: &[u8; 8]);
     fn read_signals(&self, now_ms: u32, dest: &mut O);
-    fn write_signals(&mut self, sigs: &I);
+    fn write_signals(&mut self, now_ms: u32, sigs: &I);
     fn transmit<E, F: FnMut(StandardId, &[u8]) -> nb::Result<(), E>>(
         &self,
         f: F,
@@ -179,6 +222,15 @@ pub enum DisplayGear {
     R,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EcuReqGear {
+    _1,
+    _2,
+    _3,
+    _4,
+    _5,
+}
+
 #[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DisplayProfile {
     A,
@@ -252,8 +304,8 @@ impl CanLayerTy {
         self.as_can_layer().read_signals(now_ms, dest);
     }
 
-    pub fn write_signals(&mut self, sigs: &CanTxData) {
-        self.as_can_layer_mut().write_signals(sigs);
+    pub fn write_signals(&mut self, now_ms: u32, sigs: &CanTxData) {
+        self.as_can_layer_mut().write_signals(now_ms, sigs);
     }
 
     pub fn transmit<E, F: FnMut(StandardId, &[u8]) -> nb::Result<(), E>>(
@@ -307,6 +359,29 @@ impl Default for WheelSpeeds {
             fl: Err(CanError::MissingMsg),
             rr: Err(CanError::MissingMsg),
             rl: Err(CanError::MissingMsg),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct TorqueOutputInfo {
+    pub trq_req_ack: bool,
+    pub driver_req_torque_nm: CanResult<f32>,
+    pub static_torque_nm: CanResult<f32>,
+    pub indicated_torque_nm: CanResult<f32>,
+    pub min_torque_nm: CanResult<f32>,
+    pub max_torque_nm: CanResult<f32>,
+}
+
+impl Default for TorqueOutputInfo {
+    fn default() -> Self {
+        Self {
+            trq_req_ack: false,
+            driver_req_torque_nm: Err(CanError::MissingMsg),
+            static_torque_nm: Err(CanError::MissingMsg),
+            indicated_torque_nm: Err(CanError::MissingMsg),
+            min_torque_nm: Err(CanError::MissingMsg),
+            max_torque_nm: Err(CanError::MissingMsg),
         }
     }
 }

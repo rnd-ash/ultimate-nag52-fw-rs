@@ -15,6 +15,7 @@ fn optionally_build_candb(db: &str, folder: &str) {
         db_modified_time > creation_time
     };
     if generate {
+        println!("cargo::warning=Generating {db}");
         codegen_db(db, folder);
     }
 }

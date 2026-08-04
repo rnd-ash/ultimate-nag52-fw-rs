@@ -4,12 +4,9 @@
     "rust-analyzer.procMacro.enable": true,
     //"rust-analyzer.check.command": "clippy",
     "rust-analyzer.cargo.targetDir": "target/ra",
-    "rust-analyzer.diagnostics.disabled": [
-        "macro-error"
-    ],
     //"rust-analyzer.check.command": "check -p bootloader -p preloader -p firmware -p bsp -p diag_common",
     "rust-analyzer.files.exclude": [
-        "firmware/can_data/*",
+        "can_data/*",
         "candb_codegen/**",
         "imgs/*",
         "flasher/**"

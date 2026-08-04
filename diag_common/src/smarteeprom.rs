@@ -29,7 +29,7 @@ pub struct SmartEepromInfo {
     /// CRC32 of Bootloader region
     pub crc32_bl: u32,
     /// Boot logger endpoint
-    pub defmt_ep: u8
+    pub defmt_ep: u8,
 }
 
 impl SmartEepromInfo {

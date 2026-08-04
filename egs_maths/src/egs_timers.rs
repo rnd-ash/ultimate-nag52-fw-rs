@@ -23,10 +23,10 @@ impl EgsCountDownTimer {
             end.into()
         } else {
             if start > end {
-                let delta: f32 = (end.into()-start.into())/(self.0 as f32);
+                let delta: f32 = (end.into() - start.into()) / (self.0 as f32);
                 start.into() + delta
             } else {
-                let delta: f32 = (start.into()-end.into())/(self.0 as f32);
+                let delta: f32 = (start.into() - end.into()) / (self.0 as f32);
                 start.into() - delta
             }
         }

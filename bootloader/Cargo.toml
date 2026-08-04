@@ -23,6 +23,7 @@ static_assertions = "1.1.0"
 rtic-sync = "1.4.0"
 futures = { version = "0.3.31", default-features = false }
 embedded-hal = { version = "1.0.0" }
+heatshrink-lib = {workspace=true}
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["now"] }

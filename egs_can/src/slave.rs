@@ -1,13 +1,17 @@
-use embedded_can::{Id, StandardId};
+use embedded_can::{StandardId};
 
 pub use crate::can_matrix::slave_mode::*;
-use crate::{CanError, CanLayer, CanResult, RxFrame, rxframe_default};
+use crate::{CanError, CanLayer, CanResult};
+
+crate::make_rx_frames!(SlaveRx {
+    SolenoidControl
+});
 
 #[derive(Copy, Clone)]
 pub struct SlaveCan {
     sensor_rpt: SensorReport,
     solenoid_rpt: SolenoidReport,
-    control_req: RxFrame<SolenoidControl>,
+    rx_frames: SlaveRx,
 }
 
 impl Default for SlaveCan {
@@ -15,7 +19,7 @@ impl Default for SlaveCan {
         Self {
             sensor_rpt: SensorReport::ZERO,
             solenoid_rpt: SolenoidReport::ZERO,
-            control_req: rxframe_default!(SolenoidControl),
+            rx_frames: SlaveRx::default(),
         }
     }
 }
@@ -37,34 +41,29 @@ pub struct SlaveStatus {
 
 impl Default for SlaveStatus {
     fn default() -> Self {
-        Self { 
-            sensors: SensorReport::ZERO, 
-            solenoids: SolenoidReport::ZERO
+        Self {
+            sensors: SensorReport::ZERO,
+            solenoids: SolenoidReport::ZERO,
         }
     }
 }
 
 impl CanLayer<SlaveStatus, SlaveReq> for SlaveCan {
     fn filters(&self) -> &[StandardId] {
-        &[SolenoidControl::CAN_ID]
+        SlaveRx::filters()
     }
 
     fn read_signals(&self, now_ms: u32, dest: &mut SlaveReq) {
-        dest.0 = self.control_req.get(100, now_ms)
+        dest.0 = self.rx_frames.solenoid_control.get(100, now_ms)
     }
 
-    fn write_signals(&mut self, sigs: &SlaveStatus) {
+    fn write_signals(&mut self, now_ms: u32, sigs: &SlaveStatus) {
         self.sensor_rpt = sigs.sensors;
         self.solenoid_rpt = sigs.solenoids;
     }
 
     fn on_frame(&mut self, now_ms: u32, id: embedded_can::Id, dlc: u8, data: &[u8; 8]) {
-        match id {
-            Id::Standard(SolenoidControl::CAN_ID) => self
-                .control_req
-                .write(SolenoidControl::from_can_msg(dlc, data), now_ms),
-            _ => {}
-        }
+        self.rx_frames.on_rx_frame(now_ms, id, dlc, data);
     }
 
     fn transmit<E, F: FnMut(embedded_can::StandardId, &[u8]) -> nb::Result<(), E>>(

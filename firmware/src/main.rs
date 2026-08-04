@@ -11,9 +11,11 @@ use atsamd_hal::rtc::rtic::rtc_clock;
 use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::sercom::Sercom2;
 use atsamd_hal::sercom::Sercom6;
+use atsamd_hal::timer::TimerCounter7;
 use core::panic::PanicInfo;
 use core::sync::atomic::AtomicU32;
 use cortex_m_rt::exception;
+use embedded_alloc::TlsfHeap;
 //use defmt_rtt as _;
 use diag_common::hal_extensions::dsu::Dsu;
 use diag_common::parse_git_sha;
@@ -26,6 +28,7 @@ use rtic_sync::portable_atomic::AtomicU16;
 use crate::diag::dev_mode::EgsDeviceMode;
 
 pub mod diag;
+pub mod egs_logic_impl;
 pub mod hal_extension;
 pub mod ram_test;
 pub mod sensors;
@@ -33,9 +36,6 @@ pub mod solenoids;
 pub mod storage;
 pub mod tasks;
 pub mod usb;
-pub mod gearbox_control;
-pub mod calbrations;
-pub mod egs_logic_impl;
 
 // -- Interrupt handlers for async APIs --  //
 bind_multiple_interrupts!(struct Sercom6Irqs {
@@ -78,6 +78,10 @@ fn panic(info: &PanicInfo) -> ! {
     SCB::sys_reset();
 }
 
+// Heap (Assigned to RTC Backup RAM)
+#[global_allocator]
+static HEAP: TlsfHeap = TlsfHeap::empty();
+
 pub const fn create_code_info(name: [u8; 20]) -> CodeSectionInfo {
     CodeSectionInfo {
         name,
@@ -111,14 +115,19 @@ pub const CAN_ID_DIAG_RX: StandardId = unsafe { StandardId::new_unchecked(0x7E1)
 mod app {
 
     use crate::{
-        diag::KwpServer,
+        diag::{KwpServer, PerfStatsTracker},
+        egs_logic_impl::TickCounter,
         sensors::{AdcData, SensorData, speed_sensors::AllSpeedSensors},
         solenoids::{SolenoidControler, tcc_sol::TccSol},
         storage::eeprom::Eeprom,
         usb::UsbData,
     };
     use atsamd_hal::{
-        clock::v2::{pclk, types::Can0}, dmac::{self}, usb::{UsbBus, usb_device::bus::UsbBusAllocator}, watchdog::Watchdog
+        clock::v2::{pclk, types::Can0},
+        dmac::{self},
+        timer::TimerCounter,
+        usb::{UsbBus, usb_device::bus::UsbBusAllocator},
+        watchdog::Watchdog,
     };
     use bsp::can_deps::{Capacities, RxDedicated, RxFifo0};
     use diag_common::{
@@ -130,8 +139,11 @@ mod app {
         },
     };
 
-    use egs_logic::egs_can::{self, CanLayerTy};
-use mcan::{
+    use egs_logic::{
+        GearboxOutputs,
+        egs_can::{self, CanLayerTy},
+    };
+    use mcan::{
         interrupt::{Interrupt, OwnedInterruptSet, state::EnabledLine0},
         message::Raw,
         messageram::SharedMemory,
@@ -162,6 +174,7 @@ use mcan::{
         pub can0_fifo0: RxFifo0,
         pub can0_dedicated: RxDedicated,
         pub diag_server: KwpServer,
+        pub hpet: TickCounter,
     }
 
     #[shared]
@@ -181,6 +194,8 @@ use mcan::{
         pub hw_interrupts: AtomicU32,
         pub wakeups: AtomicU32,
         pub dsu: &'static Arbiter<diag_common::hal_extensions::dsu::Dsu>,
+        pub perf_stats: PerfStatsTracker,
+        pub outputs: GearboxOutputs,
     }
 
     #[init(local = [
@@ -216,12 +231,12 @@ use mcan::{
         tasks::idle(&ctx)
     }
 
-    #[task(priority = 2, shared=[wdt, &cpu_idle_ticks, &hw_interrupts, &wakeups])]
+    #[task(priority = 2, shared=[wdt, &cpu_idle_ticks, &hw_interrupts, &wakeups, perf_stats])]
     async fn perf_monitor(ctx: perf_monitor::Context, tps: u32) {
         tasks::performance_monitor(ctx, tps).await;
     }
 
-    #[task(priority = 2, local = [usb_isotp_thread, isotp_thread, diag_server], shared=[&device_mode])]
+    #[task(priority = 2, local = [usb_isotp_thread, isotp_thread, diag_server], shared=[&device_mode, perf_stats, outputs])]
     async fn diag_task(cx: diag_task::Context) {
         tasks::diag_task(cx).await;
     }
@@ -231,7 +246,7 @@ use mcan::{
         tasks::sensor_query(cx).await;
     }
 
-    #[task(priority = 2, shared=[can_layer, slave_can, soltcc, sensor_data, &device_mode])]
+    #[task(priority = 1, local=[hpet], shared=[can_layer, slave_can, soltcc, sensor_data, outputs, &device_mode, wdt, perf_stats])]
     async fn gearbox_task(
         cx: gearbox_task::Context,
         can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
@@ -322,9 +337,6 @@ use mcan::{
         cx.shared.soltcc.lock(|lck| lck.on_tcc_mc2());
     }
 }
-
-// For Device mode operation
-static DEVICE_MODE: AtomicU16 = AtomicU16::new(EgsDeviceMode::INITIALIZATION.bits());
 
 #[exception(trampoline = false)]
 unsafe fn HardFault() -> ! {

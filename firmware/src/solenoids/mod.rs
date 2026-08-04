@@ -5,15 +5,16 @@ use atsamd_hal::{
     time::Hertz,
 };
 use bsp::PowerEnSol;
+use defmt::println;
 
 use crate::{
+    Mono,
     solenoids::{
         commands::{ShortToBatThreshold, TleChannel},
         solenoid_ctrl::{DitherSettings, Mode},
         tcc_sol::TccSol,
-        tle8242::{ChannelProps, Tle8242, TleConfiguration, R_SENSE_VAL, TLE8242_CLK_FREQ},
+        tle8242::{ChannelProps, R_SENSE_VAL, TLE8242_CLK_FREQ, Tle8242, TleConfiguration},
     },
-    Mono,
 };
 
 pub mod commands;

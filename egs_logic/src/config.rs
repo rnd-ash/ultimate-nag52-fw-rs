@@ -7,7 +7,7 @@ pub enum CanLayerTy {
     EGS52 = 2,
     EGS53 = 3,
     Hfm = 4,
-    Custom = 5
+    Custom = 5,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -18,14 +18,14 @@ pub enum ShifterTy {
     Ewm = 1,
     Slr = 2,
     Trrs = 3,
-    Ism = 4
+    Ism = 4,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogicThresh {
     _5V,
     #[default]
-    _12V
+    _12V,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -34,7 +34,7 @@ pub enum InPinPurpose {
     None,
     InputPulse {
         thresh: LogicThresh,
-        pulses_rev: u8
+        pulses_rev: u8,
     },
 }
 
@@ -43,7 +43,7 @@ bitflags::bitflags! {
         const FOURMATIC = 1;
         const CHRYSLER = 1 << 1;
         const HARDWARE_START = 1 << 2;
-        
+
     }
 }
 
@@ -52,7 +52,6 @@ bitflags::bitflags! {
 pub struct EgsConfig {
     shifter_ty: ShifterTy,
     can_ty: CanLayerTy,
-
 
     engine_inertia_nm: u8,
     tyre_size_mm: u16,
@@ -63,5 +62,3 @@ pub struct EgsConfig {
 
     pin_23_purpose: InPinPurpose,
 }
-
-

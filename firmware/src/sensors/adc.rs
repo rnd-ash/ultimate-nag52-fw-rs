@@ -2,14 +2,11 @@ use atsamd_hal::{
     adc::{Adc0, Adc1, FutureAdc},
     pac::Supc,
 };
-use bsp::{
-    AccelP, PmonKl15, PmonKl87, PmonKl87Diag,
-    PmonSensors, Tft, TsenPcb, TsenTle8242,
-};
+use bsp::{AccelP, PmonKl15, PmonKl87, PmonKl87Diag, PmonSensors, Tft, TsenPcb, TsenTle8242};
 
 use crate::{
-    sensors::variable_adc_input::{VariableAcMBrk, VariableGpio1, VariableGpio2, VariableGpio3},
     Adc0Irqs, Adc1Irqs,
+    sensors::variable_adc_input::{VariableAcMBrk, VariableGpio1, VariableGpio2, VariableGpio3},
 };
 
 pub struct Adc0Pins {

@@ -3,12 +3,12 @@ use bitflags::bitflags;
 pub enum CanValueResult<T> {
     Ok(T),
     MissingMsg,
-    InvalidMsgLen
+    InvalidMsgLen,
 }
 
 pub enum CanState {
     Ok,
-    BusErr
+    BusErr,
 }
 
 bitflags! {
@@ -32,7 +32,7 @@ bitflags! {
 bitflags! {
     /// Device mode, compatible with original EGS Siemens layer
     /// so that device mode shows up correctly in DAS.
-    /// 
+    ///
     /// These definitions can be found in EGS5x CBF file
     #[derive(Copy, Clone)]
     pub struct DeviceMode: u16 {
@@ -40,7 +40,7 @@ bitflags! {
         const NORMAL = 1;
         /// Montage mode active (Solenoid self-test)
         const MONTAGE = 1 << 1;
-        /// Roller mode active (Test bench drive cycle - 
+        /// Roller mode active (Test bench drive cycle -
         /// Never used by this code base)
         const ROLLER = 1 << 2;
         /// Slave mode active (Solenoid control on bench)
@@ -49,7 +49,7 @@ bitflags! {
         const TEMP_EMERGENCY = 1 << 4;
         /// Hardware internal error - Cannot be cleared
         const HARDWARE_ERR = 1 << 5;
-        /// Emergency mode active, which can only be reset 
+        /// Emergency mode active, which can only be reset
         /// via DTC clearing
         const PERM_EMERGENCY = 1 << 6;
         /// Undervoltage detected (Will be cleared once voltage
