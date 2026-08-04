@@ -1,0 +1,48 @@
+use egs_maths::{declare_2d_map, maps::Map2d};
+
+use crate::calbrations::ShiftIndexedArray;
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct HydrCal {
+    pub p_multi_1: u16,
+    pub p_multi_other: u16,
+    pub lp_reg_spring_pressure: u16,
+    pub overlap_circuit_factor_spc: ShiftIndexedArray<u16>,
+    pub overlap_circuit_factor_mpc: ShiftIndexedArray<u16>,
+    pub overlap_circuit_spring_pressure: ShiftIndexedArray<i16>,
+    pub shift_reg_spring_pressure: u16,
+    pub shift_spc_gain: ShiftIndexedArray<u16>,
+    pub min_mpc_pressure: u16,
+    pub filter_factor: u8,
+    pub mpc_flush_temp_threshold: u8,
+    pub mpc_no_flush_time: u16,
+    pub mpc_flush_time: u16,
+    pub extra_p_not_shifting: u16,
+    pub shift_pressure_addr_percent: u16,
+    pub inlet_pressure_offset: u16,
+    pub inlet_pressure_input_min: u16,
+    pub inlet_pressure_input_max: u16,
+    pub inlet_pressure_output_min: u16,
+    pub inlet_pressure_output_max: u16,
+    pub extra_pressure_pump_speed_min: u16,
+    pub extra_pressure_pump_speed_max: u16,
+    pub extra_pressure_adder_r1_1: u16,
+    pub extra_pressure_adder_other_gears: u16,
+    pub shift_pressure_factor_percent: u16,
+    pub pcs_map_x: [u16; 7],
+    pub pcs_map_y: [u16; 4],
+    pub pcs_map_z: [u16; 28],
+}
+
+declare_2d_map!(PcsMap, 7, 4, u16, u16, u16);
+
+impl HydrCal {
+    pub const fn pcs_map<'a>(&'a self) -> PcsMap<'a> {
+        Map2d::new(&self.pcs_map_x, &self.pcs_map_y, &self.pcs_map_z)
+    }
+
+    pub const fn max_pcs_pressure(&self) -> u16 {
+        self.pcs_map_x[6]
+    }
+}
