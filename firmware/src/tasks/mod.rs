@@ -10,27 +10,24 @@ pub use init::*;
 pub use performance_monitor::*;
 pub use sensors::*;
 
-use core::{ptr::addr_of, sync::atomic::Ordering};
+use core::ptr::addr_of;
 
 use crate::{app, ram_test};
 use atsamd_hal::pac::{DWT, SCB};
-use cortex_m::asm::wfi;
+use cortex_m::{asm::wfi};
 use diag_common::{
     hal_extensions::dsu::{self, MemoryTestResult},
     ram_info::modify_bootloader_info,
 };
+use rtic::Mutex;
 
 /// Returns (New value of DWT, Delta ticks)
 pub(crate) fn elapsed_dwt_ticks(old: u32) -> (u32, u32) {
     let new = DWT::cycle_count();
-    if new > old {
-        (new, new - old)
-    } else {
-        (new, ((old as u64 + u32::MAX as u64) - new as u64) as u32)
-    }
+    (new, new.wrapping_sub(old))
 }
 
-pub fn idle(ctx: &app::idle::Context) -> ! {
+pub fn idle(ctx: &mut app::idle::Context) -> ! {
     let (mut dwt, mut dcb, nvic) = unsafe {
         let p = cortex_m::Peripherals::steal();
         (p.DWT, p.DCB, p.NVIC)
@@ -57,11 +54,10 @@ pub fn idle(ctx: &app::idle::Context) -> ! {
             *watermark = (addr / 4096) * 4096;
         }
     }
-    // Pesimistic view of stack watermark,
+    // Pessimistic view of stack watermark,
     // so we don't write into the stack
     set_stack_watermark(&mut ram_test_end);
     let mut ram_test_done = false;
-    let mut dwt_count = 0;
     // Always enable these
     dcb.enable_trace();
     dwt.enable_cycle_counter();
@@ -106,7 +102,7 @@ pub fn idle(ctx: &app::idle::Context) -> ! {
                     }
                     (
                         dwt_count,
-                        nvic.ispr.iter().map(|x| x.read().count_ones()).sum(),
+                        nvic.ispr.iter().map(|x| x.read().count_ones()).sum::<u32>(),
                     )
                 }
             } else {
@@ -114,17 +110,15 @@ pub fn idle(ctx: &app::idle::Context) -> ! {
                 wfi();
                 (
                     elapsed_dwt_ticks(dwt_pre_count).1,
-                    nvic.ispr.iter().map(|x| x.read().count_ones()).sum(),
+                    nvic.ispr.iter().map(|x| x.read().count_ones()).sum::<u32>(),
                 )
             }
         });
         // Write down CPU usage after interrupt performed (Lowers latency to interrupt)
-        ctx.shared
-            .cpu_idle_ticks
-            .fetch_add(sleep_ticks, Ordering::Relaxed);
-        ctx.shared
-            .hw_interrupts
-            .fetch_add(pending_isr_count, Ordering::Relaxed);
-        ctx.shared.wakeups.fetch_add(1, Ordering::Relaxed);
+        ctx.shared.perf_info.lock(|lck| {
+            lck.wakeups += 1;
+            lck.hw_interrupts += pending_isr_count;
+            lck.cpu_idle_ticks += sleep_ticks;
+        });
     }
 }

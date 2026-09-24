@@ -107,7 +107,7 @@ impl Mode {
                     Err(ModeError::DitherStepSizeOverflow)
                 } else {
                     Ok(DitherOpts {
-                        step_size: step_size,
+                        step_size,
                         steps: steps as u8,
                     })
                 }
@@ -174,7 +174,7 @@ impl Mode {
                     ki: floor_unsigned(ki),
                     divn: lims.n,
                     divm: DividerM::_128,
-                    dither_opts: dither_opts,
+                    dither_opts,
                 })
             }
         }

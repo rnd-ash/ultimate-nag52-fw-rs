@@ -1,14 +1,13 @@
 use core::num::NonZeroU8;
 
 use arbitrary_int::{UInt, traits::Integer, u5, u13};
-use defmt::println;
-use embedded_can::{Id, StandardId};
+use embedded_can::{StandardId};
 use num_traits::clamp;
 
 use crate::bit_checking::SafeCanValue;
 pub use crate::can_matrix::egs_52::*;
 use crate::{
-    CanError, CanLayer, CanResult, CanRxData, CanTxData, RxFrame, ShiftPaddlePos,
+    CanError, CanLayer, CanResult, CanRxData, CanTxData, ShiftPaddlePos,
     TipTronicShifterPos, TorqueOutputInfo,
 };
 
@@ -107,15 +106,23 @@ impl Egs52Can {
 
         ret.max_torque_nm = ms312.and_then(|ms| ms.m_max().with_valid(torque_to_f32));
         ret.min_torque_nm = ms312.and_then(|ms| ms.m_min().with_valid(torque_to_f32));
-        ret.static_torque_nm = ms312.and_then(|ms| ms.m_sta().with_valid(torque_to_f32));
         ret.driver_req_torque_nm = self
             .rx_frames
             .ms212_h
             .get(100, now_ms)
             .and_then(|x| x.m_espv().with_valid(torque_to_f32));
 
+        let static_trq = ms312.and_then(|ms| ms.m_sta().with_valid(torque_to_f32));
+        //if let Ok(static) = static_trq && let Ok(driver) = ret.driver_req_torque_nm {
+        //    let should_freeze = self.gs218.mmax_egs() | self.gs218.mmin_egs();
+        //}
+        
+
         // FMOTMAX compensation for max torque based on altitude
-        if let Ok(m_max) = ret.max_torque_nm {}
+        if let Ok(m_max) = &mut ret.max_torque_nm {
+            let factor = self.rx_frames.ms210_h.get(100, now_ms).map(|x| x.fmmotmax()).unwrap_or(100);
+            *m_max *= (factor as f32 / 100.0);
+        }
 
         ret
     }

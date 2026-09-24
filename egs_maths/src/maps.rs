@@ -1,58 +1,6 @@
-use core::{
-    ops::{Add, Deref, Div, Index, Mul, Sub},
-    slice::SliceIndex,
-};
-
-use crate::search_value;
-
-#[derive(Copy, Clone, PartialEq, PartialOrd)]
-pub struct Safei32(i32);
-
-impl Safei32 {
-    pub const fn new<const N: i32>() -> Self {
-        const {
-            assert!(N <= f32::MAX as i32);
-            assert!(N >= f32::MIN as i32);
-        }
-        Self(N)
-    }
-}
-
-impl Deref for Safei32 {
-    type Target = i32;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Into<f32> for Safei32 {
-    fn into(self) -> f32 {
-        self.0 as _
-    }
-}
-
-impl TcuNum for Safei32 {}
-
-impl Div for Safei32 {
-    type Output = i32;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        self.0 / rhs.0
-    }
-}
+use crate::{search_value, tcu_num::TcuNum};
 
 pub trait TcuIdx<const MAX: usize>: Into<usize> {}
-
-pub trait TcuNum: PartialOrd + PartialEq + Into<f32> + Copy + Clone {}
-
-impl TcuNum for i16 {}
-impl TcuNum for u16 {}
-
-impl TcuNum for i8 {}
-impl TcuNum for u8 {}
-
-impl TcuNum for f32 {}
 
 pub struct TupleMap<'a, X: TcuNum, Z: TcuNum, const N: usize>(&'a [(X, Z); N]);
 
@@ -106,8 +54,7 @@ impl<'a, X: TcuNum, Z: TcuNum, const N: usize> Map1d<'a, X, Z, N> {
         const {
             assert!(XIDX <= N);
         }
-        todo!()
-        //self.z[x_idx]
+        self.z[x_idx.into()]
     }
 }
 
@@ -213,8 +160,7 @@ impl<'a, const XS: usize, const YS: usize, const ZS: usize, X: TcuNum, Y: TcuNum
             assert!(XIDX <= XS);
             assert!(YIDX <= YS);
         }
-        todo!()
-        //self.z_as_rows()[x_idx.into()][y_idx.into()]
+        self.z_as_rows()[x_idx.into()][y_idx.into()]
     }
 
     pub const fn z_as_rows(&self) -> &[[Z; XS]; YS] {

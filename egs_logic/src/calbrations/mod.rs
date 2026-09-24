@@ -1,7 +1,5 @@
 use core::ops::Index;
 
-use egs_maths::{declare_2d_map, maps::Map2d};
-
 use crate::{Clutch, Gear, ShiftCircuit};
 
 pub mod hydr;
@@ -66,7 +64,7 @@ impl<T> Index<Gear> for GearIndexedArray<T> {
 
     fn index(&self, index: Gear) -> &Self::Output {
         match index {
-            Gear::N | Gear::P => &self[0],
+            Gear::N => &self[0],
             Gear::_1 => &self[1],
             Gear::_2 => &self[2],
             Gear::_3 => &self[3],

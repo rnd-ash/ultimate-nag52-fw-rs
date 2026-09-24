@@ -1,6 +1,6 @@
 use egs_maths::{declare_2d_map, maps::Map2d};
 
-use crate::calbrations::ShiftIndexedArray;
+use crate::{ShiftCircuit, calbrations::ShiftIndexedArray};
 
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -44,5 +44,16 @@ impl HydrCal {
 
     pub const fn max_pcs_pressure(&self) -> u16 {
         self.pcs_map_x[6]
+    }
+
+    /// Returns the maximum hydraulic pressure that is possible to reach the clutch
+    /// being manipulated by the SPC Solenoid, taking into account the resistance of the
+    /// shift pressure regulator spring, and hydraulic gain for each shift circuit.
+    pub fn max_p_apply_clutch(&self, ss: ShiftCircuit) -> u16 {
+        let mut p_max_shift = self
+            .max_pcs_pressure()
+            .saturating_sub(self.shift_reg_spring_pressure) as u32;
+        p_max_shift *= self.shift_spc_gain[ss] as u32;
+        (p_max_shift / 1000) as _
     }
 }

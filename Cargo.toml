@@ -1,5 +1,5 @@
 [workspace]
-members = ["firmware", "bsp", "bootloader", "diag_common", "preloader", "egs_maths", "egs_logic", "egs_can", "candb_codegen", "flasher"]
+members = ["firmware", "bsp", "bootloader", "diag_common", "preloader", "egs_maths", "egs_logic", "egs_can", "candb_codegen", "flasher", "egs_pc_sim"]
 
 exclude = []
 
@@ -36,7 +36,7 @@ atsamd-hal = { git = "https://github.com/rnd-ash/atsamd/", branch = "feat/pic32c
     "usb-buffer-4k",
 ] }
 
-cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m = { version = "0.7.9", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.6", features = ["device"] }
 mcan = "0.7.0"
 defmt = "1.1.1"

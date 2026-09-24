@@ -1,0 +1,9 @@
+words = [
+    "atf",
+    "defmt",
+    "mpc",
+    "pwm",
+    "spc",
+    "tcc",
+    "trrs",
+]

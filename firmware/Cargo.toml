@@ -41,6 +41,8 @@ atsamd-hal-macros = "0.3.0"
 seq-macro = "0.3.6"
 pastey = "0.2.3"
 embedded-alloc = "0.7.0"
+derived = "0.4.2"
+bbqueue = "0.7.0"
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["now"] }

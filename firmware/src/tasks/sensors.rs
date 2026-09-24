@@ -3,12 +3,22 @@ use rtic::Mutex;
 
 use crate::{Mono, app};
 
+const INTERVAL_POLL: u64 = 10;
+
 pub async fn sensor_query(mut cx: app::sensor_query::Context<'_>) {
     loop {
         let now = Mono::now();
-        let _speed_sensors = cx.local.speed_sensors.update();
+
         let data = cx.local.adc_data.update().await;
-        cx.shared.sensor_data.lock(|l| *l = data);
-        Mono::delay_until(now + 10u64.millis()).await;
+
+        if data.vkl15 < 7000 {
+            // Less than 7V, disable outputs
+        }
+
+        cx.shared.sensor_data.lock(|l| {
+            **l = data;
+            //**l.speed_sensor
+        });
+        Mono::delay_until(now + INTERVAL_POLL.millis()).await;
     }
 }

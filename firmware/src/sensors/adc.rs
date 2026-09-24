@@ -72,6 +72,7 @@ pub struct Adc1Result {
 }
 
 impl Adc1Pins {
+
     pub async fn poll_all(&mut self, adc1: &mut FutureAdc<Adc1, Adc1Irqs>) -> Adc1Result {
         Adc1Result {
             ac_p: adc1.read(&mut self.ac_p).await,

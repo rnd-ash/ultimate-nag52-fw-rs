@@ -4,7 +4,6 @@
 //! * Padding of each frame to 8 bytes
 //! * Non extended CAN or extended ISO-TP addressing
 
-use defmt::println;
 use mcan::{
     core::CanId,
     embedded_can::Id,
@@ -310,7 +309,7 @@ impl<'a, ID: CanId + 'a, C: Capacities + 'a, const N: usize> IsotpConsumer<'a, I
                     _ = mono.delay_ms(1000).fuse() => {
                         break Err(IsoTpTxErr::Timeout)
                     },
-                    // Receieved a flow control msg
+                    // Received a flow control msg
                     fc_result = self.rx_clear_to_send.wait().fuse() => {
                         match fc_result {
                             IsotpCtsMsg::Ok { stmin, bs } => {

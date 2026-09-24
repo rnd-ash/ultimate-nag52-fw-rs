@@ -66,3 +66,15 @@ bitflags! {
         const CONDITIONAL_EMERGENCY = 1 << 11;
     }
 }
+
+impl DeviceMode {
+    pub fn has_error(&self) -> bool {
+        self.contains(
+            Self::TEMP_EMERGENCY
+                | Self::PERM_EMERGENCY
+                | Self::HARDWARE_ERR
+                | Self::UNDERVOLTAGE_EMERGENCY
+                | Self::CONDITIONAL_EMERGENCY,
+        )
+    }
+}

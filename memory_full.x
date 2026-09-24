@@ -18,19 +18,19 @@ SECTIONS {
     *(.can .can.*);
   } > CAN
 
-  .bl_comm (NOLOAD):  
+  .bl_comm (NOLOAD):
   {
     *(.bl_comm);
   } > BL_COMM
 
-  .ram_test (NOLOAD):  
+  .ram_test (NOLOAD):
   {
     *(.ram_test);
   } > RAM_TST
 
   .log_ram (NOLOAD):
   {
-    *(.log_ram.*);
+    *(.log_ram);
   } > LOG_RAM
 }
 

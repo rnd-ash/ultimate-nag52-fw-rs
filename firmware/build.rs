@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::{env, fs};
+use std::{env};
 use vergen::Emitter;
 use vergen_git2::Git2Builder;
 

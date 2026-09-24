@@ -8,6 +8,9 @@ pub mod isotp_endpoints;
 #[cfg(feature = "mcu")]
 pub mod hal_extensions;
 
+#[cfg(feature = "mcu")]
+pub mod qspi_driver;
+
 pub mod smarteeprom;
 
 #[cfg(feature = "mcu")]
@@ -19,6 +22,9 @@ pub mod ram_info;
 #[cfg(feature = "mcu")]
 pub mod defmt_multi_output;
 
+pub mod diag_buffer;
+pub mod diag_core;
+
 #[derive(Debug, Clone, Copy)]
 pub enum DefmtTarget {
     Rtt = 0, // Default (Always available)
@@ -26,6 +32,7 @@ pub enum DefmtTarget {
     Serial = 2,
 }
 
+pub const QSPI_AHB: u32 = 0x04000000;
 pub const CAN_ID_DEFMT_LOG: u16 = 0x500; // Reserved on ALL CAN Layers
 pub const USB_PACKET_TY_ISOTP: u8 = 0xFF;
 pub const USB_PACKET_TY_DEFMT: u8 = 0xFE;
@@ -85,12 +92,14 @@ const PRELOADER_ADDR_RANGE: Range<u32> = 0..(8 * KB);
 const BOOTLOADER_ADDR_RANGE: Range<u32> = (8 * KB)..(120 * KB);
 const BOOTLOADER_SCRATCH_ADDR_RANGE: Range<u32> = (120 * KB)..(240 * KB);
 const APP_ADDR_RANGE: Range<u32> = (120 * KB)..(1024 * KB);
+const QPSI_ADDR_RANGE: Range<u32> = (QSPI_AHB..(QSPI_AHB + 16 * 1024 * KB));
 
 pub enum MemoryRegion {
     Preloader,
     Bootloader,
     BootloaderScratch,
     Application,
+    QspiFlash,
 }
 
 impl MemoryRegion {
@@ -100,12 +109,18 @@ impl MemoryRegion {
             MemoryRegion::Bootloader => BOOTLOADER_ADDR_RANGE,
             MemoryRegion::BootloaderScratch => BOOTLOADER_SCRATCH_ADDR_RANGE,
             MemoryRegion::Application => APP_ADDR_RANGE,
+            MemoryRegion::QspiFlash => QPSI_ADDR_RANGE,
         }
     }
 
     pub const fn blocks_8k(&self) -> u32 {
         let range = self.range_exclusive();
         (range.end - range.start) / SECTOR_SIZE
+    }
+
+    pub const fn blocks_4k(&self) -> u32 {
+        let range = self.range_exclusive();
+        (range.end - range.start) / (SECTOR_SIZE / 2)
     }
 
     pub const fn start_addr(&self) -> u32 {
@@ -121,3 +136,4 @@ impl MemoryRegion {
 static_assertions::const_assert!(PRELOADER_ADDR_RANGE.start.is_multiple_of(SECTOR_SIZE));
 static_assertions::const_assert!(BOOTLOADER_ADDR_RANGE.start.is_multiple_of(SECTOR_SIZE));
 static_assertions::const_assert!(APP_ADDR_RANGE.start.is_multiple_of(SECTOR_SIZE));
+static_assertions::const_assert!(QPSI_ADDR_RANGE.start.is_multiple_of(SECTOR_SIZE));

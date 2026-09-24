@@ -185,16 +185,16 @@ impl<T: CounterInstance, EvId: super::evsys::ChId, EvSrc: EvSysGenerator>
         (self.instance, unhooked)
     }
 
-    pub fn count_and_clear(&self) -> u16 {
+    pub fn count_and_reset(&self) -> u16 {
         let instance = self.instance.count16();
         instance.ctrlbset().write(|w| w.cmd().readsync());
         self.sync();
         while instance.ctrlbset().read().cmd().bits() != 0 {
             core::hint::spin_loop();
         }
-        let count = instance.count().read().bits();
+        let v = instance.count().read().bits();
         self.clear();
-        count
+        v
     }
 
     #[inline(always)]

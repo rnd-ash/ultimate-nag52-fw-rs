@@ -1,5 +1,5 @@
 use crate::{Mono, app};
-use app::diag_task::{SharedResources, LocalResources};
+use app::diag_task::{LocalResources};
 use atsamd_hal::{fugit::ExtU64, rtic_time::Monotonic};
 use futures::FutureExt;
 
@@ -13,7 +13,7 @@ pub async fn diag_task(mut ctx: app::diag_task::Context<'_>) {
 
     let mut is_usb: bool = false;
     loop {
-        let deadline = Mono::now() + 20u64.millis();
+        let deadline = Mono::now() + 100u64.millis();
 
         futures::select_biased! {
             buf = isotp_thread.read_payload().fuse() => {
@@ -24,6 +24,7 @@ pub async fn diag_task(mut ctx: app::diag_task::Context<'_>) {
                     &mut ctx.shared
                 ).await;
                 let _ = isotp_thread.write_payload(&mut Mono, response).await;
+                Mono::delay(10u64.millis()).await;
             },
             buf = usb_isotp_thread.read().fuse() => {
                 is_usb = true;
@@ -33,6 +34,7 @@ pub async fn diag_task(mut ctx: app::diag_task::Context<'_>) {
                     &mut ctx.shared
                 ).await;
                 let _ = usb_isotp_thread.write(response).await;
+                Mono::delay(10u64.millis()).await;
             },
             _ = Mono::delay_until(deadline).fuse() => {
                 // Fallthrough so we update KWP server

@@ -1,7 +1,7 @@
 use atsamd_hal::ehal::digital::OutputPin;
 use atsamd_hal::usb::{
     UsbBus,
-    usb_device::{bus::UsbBusAllocator, device::UsbDevice},
+    usb_device::device::UsbDevice,
 };
 use bsp::LedUsb;
 use diag_common::isotp_endpoints::usb_isotp::UsbIsoTpInterruptHandler;

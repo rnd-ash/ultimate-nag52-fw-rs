@@ -1,10 +1,10 @@
 use core::{
-    cell::RefCell,
-    sync::atomic::{AtomicBool, AtomicU8},
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicU8, compiler_fence},
 };
 
-use atsamd_hal::{usb::UsbBus};
-use cortex_m::interrupt::{CriticalSection, Mutex, free};
+use atsamd_hal::usb::UsbBus;
+use critical_section::RestoreState;
 use defmt::{Encoder, global_logger};
 use mcan::{
     embedded_can::{Id, StandardId},
@@ -21,25 +21,23 @@ const LOG_MODE_RTT: u8 = 0;
 const LOG_MODE_CAN: u8 = 1;
 const LOG_MODE_SER: u8 = 2;
 
-static IN_USE_LOGGGER: Mutex<RefCell<Option<InUseLogger>>> = Mutex::new(RefCell::new(None));
 static MODE: AtomicU8 = AtomicU8::new(LOG_MODE_RTT);
 static RTT_CHANNEL_INIT: AtomicBool = AtomicBool::new(false);
-static RTT_CHANNEL: Mutex<RefCell<Option<UpChannel>>> = Mutex::new(RefCell::new(None));
+
 static mut CAN_LOGGGER: Option<&'static Arbiter<bsp::can_deps::Can0Tx>> = None;
 static mut SER_LOGGGER: Option<&'static Arbiter<SerialPort<'static, UsbBus>>> = None;
 
 pub enum InUseLogger {
-    Rtt((defmt::Encoder, UpChannel)),
     Can(
         (
             ExclusiveAccess<'static, bsp::can_deps::Can0Tx>,
-            BufferedDefmtWriter<256, 8>,
+            BufferedDefmtWriter<256>,
         ),
     ),
     Serial(
         (
             ExclusiveAccess<'static, SerialPort<'static, UsbBus>>,
-            BufferedDefmtWriter<256, 32>,
+            BufferedDefmtWriter<256>,
         ),
     ),
 }
@@ -49,13 +47,13 @@ pub enum Error {
     EndpointNotPresent,
 }
 
-pub struct BufferedDefmtWriter<const BUF_LEN: usize, const PKT_MAX: usize> {
+pub struct BufferedDefmtWriter<const BUF_LEN: usize> {
     inner: [u8; BUF_LEN],
     pos: usize,
     pci: u8,
 }
 
-impl<const BUF_LEN: usize, const PKT_MAX: usize> Default for BufferedDefmtWriter<BUF_LEN, PKT_MAX> {
+impl<const BUF_LEN: usize> Default for BufferedDefmtWriter<BUF_LEN> {
     fn default() -> Self {
         Self {
             inner: [0; BUF_LEN],
@@ -65,10 +63,9 @@ impl<const BUF_LEN: usize, const PKT_MAX: usize> Default for BufferedDefmtWriter
     }
 }
 
-impl<const BUF_LEN: usize, const PKT_MAX: usize> BufferedDefmtWriter<BUF_LEN, PKT_MAX> {
-    pub fn write<F: FnMut(&[u8]) -> Option<usize>>(
+impl<const BUF_LEN: usize> BufferedDefmtWriter<BUF_LEN> {
+    pub fn write<const PKT_MAX: usize, F: FnMut(&[u8]) -> Option<usize>>(
         &mut self,
-        end: bool,
         data: &[u8],
         mut write_fn: F,
     ) {
@@ -79,13 +76,13 @@ impl<const BUF_LEN: usize, const PKT_MAX: usize> BufferedDefmtWriter<BUF_LEN, PK
         self.inner[self.pos..self.pos + data.len()].copy_from_slice(data);
         self.pos += data.len();
 
-        if self.pos > PKT_MAX || end {
+        if self.pos > PKT_MAX || data.is_empty() {
             let mut out_pos = 0;
             let data_max = PKT_MAX - 1;
             let mut buf = [0; PKT_MAX];
             loop {
                 let max = core::cmp::min(self.pos - out_pos, data_max);
-                if end && self.pos - out_pos <= data_max {
+                if data.is_empty() && self.pos - out_pos <= data_max {
                     self.pci = 0xFF;
                 }
 
@@ -102,11 +99,11 @@ impl<const BUF_LEN: usize, const PKT_MAX: usize> BufferedDefmtWriter<BUF_LEN, PK
                     self.pci = 1;
                 }
                 let left = self.pos - out_pos;
-                if (end && left == 0) || (!end && left < PKT_MAX) {
+                if (data.is_empty() && left == 0) || (!data.is_empty() && left < PKT_MAX) {
                     break;
                 }
             }
-            if !end {
+            if !data.is_empty() {
                 self.pos -= out_pos;
                 self.inner.rotate_left(out_pos);
             }
@@ -115,7 +112,11 @@ impl<const BUF_LEN: usize, const PKT_MAX: usize> BufferedDefmtWriter<BUF_LEN, PK
 }
 
 const CAN_ID_DEFMT: StandardId = unsafe { StandardId::new_unchecked(crate::CAN_ID_DEFMT_LOG) };
-fn write_data_can(tx: &mut bsp::can_deps::Can0Tx, buf: &[u8]) -> Option<usize> {
+
+fn write_data_can(
+    can_tx: &mut ExclusiveAccess<bsp::can_deps::Can0Tx>,
+    buf: &[u8],
+) -> Option<usize> {
     let mb = MessageBuilder {
         id: Id::Standard(CAN_ID_DEFMT),
         frame_type: FrameType::Classic(mcan::message::tx::ClassicFrameType::Data(buf)),
@@ -123,10 +124,13 @@ fn write_data_can(tx: &mut bsp::can_deps::Can0Tx, buf: &[u8]) -> Option<usize> {
     }
     .build()
     .unwrap();
-    tx.transmit_queued(mb).ok().map(|_| buf.len())
+    can_tx.transmit_queued(mb).ok().map(|_| buf.len())
 }
 
-fn write_data_serial(serial: &mut SerialPort<'static, UsbBus>, buf: &[u8]) -> Option<usize> {
+fn write_data_serial(
+    serial: &mut ExclusiveAccess<'_, SerialPort<'static, UsbBus>>,
+    buf: &[u8],
+) -> Option<usize> {
     if serial.dtr() {
         let size = (buf.len() as u16 + 1).to_le_bytes();
         serial.write(&size).ok()?;
@@ -138,61 +142,38 @@ fn write_data_serial(serial: &mut SerialPort<'static, UsbBus>, buf: &[u8]) -> Op
 }
 
 impl InUseLogger {
-    pub fn start(&mut self) {
-        match self {
-            InUseLogger::Rtt((encoder, channel)) => {
-                encoder.start_frame(|w| {
-                    channel.write(w);
-                });
-            }
-            _ => {}
-        }
-    }
-
     pub fn write(&mut self, bytes: &[u8]) {
         match self {
-            InUseLogger::Rtt((encoder, channel)) => {
-                encoder.write(bytes, |w| {
-                    channel.write(w);
-                });
-            }
             InUseLogger::Can((can, buffer)) => {
-                buffer.write(false, bytes, |data| write_data_can(can, data));
+                buffer.write::<8, _>(bytes, |data| write_data_can(can, data));
             }
             InUseLogger::Serial((ser, buffer)) => {
-                buffer.write(false, bytes, |data| write_data_serial(ser, data));
+                buffer.write::<32, _>(bytes, |data| write_data_serial(ser, data));
             }
         }
     }
 
-    pub fn release(self, cs: &CriticalSection) {
+    pub fn release(self) {
         match self {
-            InUseLogger::Rtt((mut encoder, mut channel)) => {
-                encoder.end_frame(|w| {
-                    channel.write(w);
-                });
-                // Put the channel back
-                *RTT_CHANNEL.borrow(cs).borrow_mut() = Some(channel);
-            }
             InUseLogger::Can((mut can, mut buffer)) => {
-                buffer.write(true, &[], |data| write_data_can(&mut can, data));
+                buffer.write::<8, _>(&[], |data| write_data_can(&mut can, data));
             }
             InUseLogger::Serial((mut ser, mut buffer)) => {
-                buffer.write(true, &[], |data| write_data_serial(&mut ser, data));
+                buffer.write::<32, _>(&[], |data| write_data_serial(&mut ser, data));
             }
         }
     }
 }
 
 fn can_defmt_logger_present() -> bool {
-    free(|_| {
+    critical_section::with(|_| {
         let raw = unsafe { *&*&raw const CAN_LOGGGER };
         raw.is_some()
     })
 }
 
 fn serial_defmt_logger_present() -> bool {
-    free(|_| {
+    critical_section::with(|_| {
         let raw = unsafe { *&*&raw const SER_LOGGGER };
         raw.is_some()
     })
@@ -227,16 +208,16 @@ pub fn get_current_defmt_log_mode() -> DefmtTarget {
 }
 
 pub fn set_defmt_can_logger(can: &'static Arbiter<bsp::can_deps::Can0Tx>) {
-    free(|_| unsafe { CAN_LOGGGER = Some(can) })
+    critical_section::with(|_| unsafe { CAN_LOGGGER = Some(can) })
 }
 
 pub fn set_defmt_serial_logger(ser: &'static Arbiter<SerialPort<'static, UsbBus>>) {
-    free(|_| unsafe { SER_LOGGGER = Some(ser) })
+    critical_section::with(|_| unsafe { SER_LOGGGER = Some(ser) })
 }
 
 pub fn init() {
     if RTT_CHANNEL_INIT.load(core::sync::atomic::Ordering::Relaxed) {
-        panic!("RTT Channel alread initialized")
+        panic!("RTT Channel already initialized")
     }
     let c = rtt_init! {
         up: {
@@ -247,64 +228,103 @@ pub fn init() {
             }
         }
     };
-    free(|cs| {
-        *RTT_CHANNEL.borrow(cs).borrow_mut() = Some(c.up.0);
+
+    critical_section::with(|_| unsafe {
+        LOGGER_STATE
+            .rtt_logger
+            .get()
+            .write(Some((Encoder::new(), c.up.0)));
     });
     RTT_CHANNEL_INIT.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
+pub struct LoggerState {
+    inner: UnsafeCell<RestoreState>,
+    rtt_logger: UnsafeCell<Option<(Encoder, UpChannel)>>,
+    alt_logger: UnsafeCell<Option<InUseLogger>>,
+}
+
+unsafe impl Sync for LoggerState {}
+
+static LOGGER_STATE: LoggerState = LoggerState {
+    inner: UnsafeCell::new(RestoreState::invalid()),
+    rtt_logger: UnsafeCell::new(None),
+    alt_logger: UnsafeCell::new(None),
+};
+
 #[global_logger]
 pub struct DefmtMutliOutputLogger;
 
+/// Safety notes
+///
+/// 1. On acquire, all interrupts are disabled
+/// 2. Write and flush get called (Potentially with multiple write calls)
+/// 3. Release is called, interrupts are re-enabled
+///
+/// The reason for doing this manually is to prevent a potential deadlock,
+/// where one of the writer's Arbiters initially is free, but then between
+/// acquire and write, gets locked by another task.
+///
+/// This way, we ensure that during the whole write of the message, the endpoints
+/// are either free, or in use (Which causes a cancelled write)
 unsafe impl defmt::Logger for DefmtMutliOutputLogger {
     fn acquire() {
-        free(|cs| {
-            let logger = IN_USE_LOGGGER.borrow(cs);
-            if logger.borrow().is_some() {
-                panic!("Logger already in use!")
-            } else {
-                let mode = MODE.load(core::sync::atomic::Ordering::Relaxed);
-                let mut msg_logger = if mode == LOG_MODE_CAN
-                    // SAFETY - In critical section
-                    && let Some(can_logger) = unsafe { CAN_LOGGGER }
-                    && let Some(aquired) = can_logger.try_access()
-                {
-                    InUseLogger::Can((aquired, BufferedDefmtWriter::default()))
-                } else if mode == LOG_MODE_SER
-                    // SAFETY - In critical section
-                    && let Some(ser_logger) = unsafe { SER_LOGGGER }
-                    && let Some(aquired) = ser_logger.try_access()
-                {
-                    InUseLogger::Serial((aquired, BufferedDefmtWriter::default()))
-                } else {
-                    // Use RTT as fallback
-                    if let Some(rtt_channel) = RTT_CHANNEL.borrow(cs).take() {
-                        InUseLogger::Rtt((Encoder::new(), rtt_channel))
-                    } else {
-                        panic!("RTT Channel not initialized")
-                    }
-                };
-                msg_logger.start();
-                *logger.borrow_mut() = Some(msg_logger);
+        let restore = unsafe { critical_section::acquire() };
+        compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            LOGGER_STATE.inner.get().write(restore);
+            // Write to RTT (All messages)
+            if let Some((encoder, rtt)) = &mut *LOGGER_STATE.rtt_logger.get() {
+                encoder.start_frame(|bytes| {
+                    rtt.write(bytes);
+                });
             }
-        });
-    }
-
-    unsafe fn flush() {}
-
-    unsafe fn release() {
-        free(|cs| {
-            if let Some(logger) = IN_USE_LOGGGER.borrow(cs).borrow_mut().take() {
-                logger.release(cs);
+            // Try to gain access to the alt endpoints
+            let mode = MODE.load(core::sync::atomic::Ordering::Relaxed);
+            if mode == LOG_MODE_CAN
+                && let Some(Some(can_tx)) = CAN_LOGGGER.map(|x| x.try_access())
+            {
+                // We have access to CAN Tx, so we can write this message
+                *(&mut *LOGGER_STATE.alt_logger.get()) =
+                    Some(InUseLogger::Can((can_tx, BufferedDefmtWriter::default())));
+            } else if mode == LOG_MODE_SER
+                && let Some(Some(ser)) = SER_LOGGGER.map(|x| x.try_access())
+            {
+                *(&mut *LOGGER_STATE.alt_logger.get()) =
+                    Some(InUseLogger::Serial((ser, BufferedDefmtWriter::default())));
             }
-        })
+        }
     }
 
     unsafe fn write(bytes: &[u8]) {
-        free(|cs| {
-            if let Some(logger) = IN_USE_LOGGGER.borrow(cs).borrow_mut().as_mut() {
-                logger.write(bytes);
-            }
-        })
+        // Safety - we are inside a CS
+        if let Some((encoder, rtt)) = unsafe { &mut *LOGGER_STATE.rtt_logger.get() } {
+            encoder.write(bytes, |bytes| {
+                rtt.write(bytes);
+            });
+        }
+
+        if let Some(writer) = unsafe { &mut *LOGGER_STATE.alt_logger.get() } {
+            writer.write(bytes);
+        }
+    }
+
+    unsafe fn flush() {
+        // Safety - We are inside a CS
+    }
+
+    unsafe fn release() {
+        if let Some((encoder, rtt)) = unsafe { &mut *LOGGER_STATE.rtt_logger.get() } {
+            encoder.end_frame(|bytes| {
+                rtt.write(bytes);
+            });
+        }
+
+        if let Some(writer) = unsafe { &mut *LOGGER_STATE.alt_logger.get() }.take() {
+            writer.release();
+        }
+
+        compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        unsafe { critical_section::release(LOGGER_STATE.inner.get().read()) };
     }
 }

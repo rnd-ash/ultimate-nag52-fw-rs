@@ -30,16 +30,13 @@ use arbitrary_int::{u7, u9};
 use atsamd_hal::{
     dmac,
     ehal_async::i2c::I2c,
-    fugit::ExtU64,
-    rtic_time::Monotonic,
+    pac::i2s::txctrl::Monoselect::Mono,
     sercom::i2c::{self, I2cFutureDma},
 };
 use bsp::EepromPads;
 use defmt::println;
 use diag_common::hal_extensions::dsu::Dsu;
 use rtic_sync::arbiter::Arbiter;
-
-use crate::Mono;
 
 pub const EEPROM_VER_MAJOR: u16 = 1;
 pub const EEPROM_VER_MINOR: u16 = 0;
@@ -108,8 +105,11 @@ impl<C: dmac::ChId> Eeprom<C> {
 
     pub async fn crc32(&mut self, data: &[u8]) -> u32 {
         let mut dsu = self.arbiter.access().await;
-        //
-        0
+        let addr = data.as_ptr().addr() as u32;
+        dsu.crc32(addr, data.len() as u32).unwrap_or_else(|e| {
+            defmt::error!("EEPROM crc32 failed: {}", e);
+            0
+        })
     }
 
     async fn init_block(&mut self, id: u16) {
@@ -125,8 +125,8 @@ impl<C: dmac::ChId> Eeprom<C> {
         let mut buf = [0; 66];
         buf[..2].copy_from_slice(&addr.to_be_bytes());
         buf[2..].copy_from_slice(&blk.pack());
-        self.i2c.write(EEPROM_I2C_ADDR, &buf).await;
-        Mono::delay(6u64.millis()).await;
+        //Mono::timeout_after();
+        //self.i2c.write(EEPROM_I2C_ADDR, &buf).await;
     }
 
     async fn read_block(&mut self, id: u16) -> Option<EepromBlock> {

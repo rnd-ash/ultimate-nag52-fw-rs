@@ -1,39 +1,43 @@
-use atsamd_hal::{
-    clock::v2::{
-        apb::ApbClk,
-        pclk::Pclk,
-        types::{self, Tc6Tc7},
-    },
-    pac::{DWT, Tc7},
-};
-use defmt::println;
-use egs_logic::calbrations::{hydr::HydrCal, mech::MechCal};
-
 use crate::tasks::elapsed_dwt_ticks;
+
+use atsamd_hal::pac::DWT;
+use egs_logic::{
+    calbrations::{hydr::HydrCal, mech::MechCal},
+    storage::{
+        GearboxAdaptStorage, GearboxCalibStorage, GearboxDtcStorage, GearboxMapStorage,
+        StorageBacking, StoragePoll,
+    },
+};
 
 #[derive(Default)]
 pub struct EgsDtcStorage;
 
-impl egs_logic::StorageBacking for EgsDtcStorage {
-    async fn init(&mut self, mode: &mut egs_logic::errors::DeviceMode) {}
+impl StorageBacking for EgsDtcStorage {
+    fn init_poll(&mut self) -> StoragePoll {
+        StoragePoll::Ready
+    }
 }
 
-impl egs_logic::GearboxDtcStorage for EgsDtcStorage {}
+impl GearboxDtcStorage for EgsDtcStorage {}
 
 #[derive(Default)]
 pub struct EgsAdpStorage;
 
-impl egs_logic::StorageBacking for EgsAdpStorage {
-    async fn init(&mut self, mode: &mut egs_logic::errors::DeviceMode) {}
+impl StorageBacking for EgsAdpStorage {
+    fn init_poll(&mut self) -> StoragePoll {
+        StoragePoll::Ready
+    }
 }
 
-impl egs_logic::GearboxAdaptStorage for EgsAdpStorage {}
+impl GearboxAdaptStorage for EgsAdpStorage {}
 
 #[derive(Default)]
 pub struct EgsCalStorage;
 
-impl egs_logic::StorageBacking for EgsCalStorage {
-    async fn init(&mut self, mode: &mut egs_logic::errors::DeviceMode) {}
+impl StorageBacking for EgsCalStorage {
+    fn init_poll(&mut self) -> StoragePoll {
+        StoragePoll::Ready
+    }
 }
 
 const HYDR_CAL: HydrCal = HydrCal {
@@ -73,7 +77,7 @@ const HYDR_CAL: HydrCal = HydrCal {
 const MECH_CAL: MechCal = MechCal {
     gb_ty: 0,
     ratio_table: [0, 3595, 2186, 1405, 1000, 831, 3167, 1926],
-    intertia_factor: [1645, 1556, 1405, 1203, 1644, 1556, 1405, 1203],
+    inertia_factor: [1645, 1556, 1405, 1203, 1644, 1556, 1405, 1203],
     friction_map: [
         4709, 0, 0, 3574, 0, 0, 0, 0, 3076, 2303, 2685, 0, 1845, 0, 1871, 0, 1633, 0, 0, 1101, 0,
         0, 1109, 0, 958, 1673, 971, 0, 0, 0, 0, 1390, 807, 604, 0, 0, 0, 0, 3076, 2303, 0, 3387,
@@ -82,7 +86,7 @@ const MECH_CAL: MechCal = MechCal {
     max_torque_on_clutch: [1000, 1000, 640, 820],
     max_torque_off_clutch: [1000, 1000, 1440, 750],
     release_spring_pressure: [1270, 846, 1205, 1139, 1289, 488],
-    intertia_torque: [16, 18, 25, 125, 16, 18, 25, 125],
+    inertia_torque: [16, 18, 25, 125, 16, 18, 25, 125],
     strongest_loaded_clutch_idx: [255, 2, 2, 1, 1, 1, 2, 2],
     turbine_drag: [16, 10, 35, 59, 16, 18, 25, 30],
     atf_density_minus_50c: 889,
@@ -90,7 +94,7 @@ const MECH_CAL: MechCal = MechCal {
     atf_density_centrifugal_force_factor: [0, 40_000, 3_000],
 };
 
-impl egs_logic::GearboxCalibStorage for EgsCalStorage {
+impl GearboxCalibStorage for EgsCalStorage {
     fn hydr_cal(&self) -> &egs_logic::calbrations::hydr::HydrCal {
         &HYDR_CAL
     }
@@ -103,15 +107,17 @@ impl egs_logic::GearboxCalibStorage for EgsCalStorage {
 #[derive(Default)]
 pub struct EgsMapStorage;
 
-impl egs_logic::StorageBacking for EgsMapStorage {
-    async fn init(&mut self, mode: &mut egs_logic::errors::DeviceMode) {}
+impl StorageBacking for EgsMapStorage {
+    fn init_poll(&mut self) -> StoragePoll {
+        StoragePoll::Ready
+    }
 }
 
-impl egs_logic::GearboxMapStorage for EgsMapStorage {}
+impl GearboxMapStorage for EgsMapStorage {}
 
-pub type V2Gearbox = egs_logic::Gearbox<EgsDtcStorage, EgsCalStorage, EgsMapStorage, EgsAdpStorage>;
+pub type V2Gearbox<'a> =
+    egs_logic::Gearbox<'a, EgsDtcStorage, EgsCalStorage, EgsMapStorage, EgsAdpStorage>;
 
-// IMPORTANT - Runs off a 2Mhz clock source
 pub struct TickCounter {
     old: u32,
 }
@@ -124,18 +130,28 @@ impl TickCounter {
     }
 }
 
+const DWT_TICKS_PER_500NS: u32 = 50;
+
 impl egs_logic::TcuTickCounter for TickCounter {
     // 10ns per clock cycle -  500ns per tick
     fn start(&mut self) {
         self.old = DWT::cycle_count();
     }
 
-    /// Returns the number of ticks in 320ns resolution
-    fn ticks(&mut self) -> u16 {
+    fn half_micros(&mut self) -> u32 {
         // Processor runs at 100Mhz (10ns per tick)
         // Divide by 50 to get 500ns resolution
         let (ticks, delta) = elapsed_dwt_ticks(self.old);
         self.old = ticks;
-        (delta / 50) as u16
+        delta / DWT_TICKS_PER_500NS
+    }
+
+    fn value_now_raw(&self) -> u32 {
+        DWT::cycle_count()
+    }
+
+    fn half_micros_since_raw(&self, v: u32) -> u32 {
+        let ticks = elapsed_dwt_ticks(v).1;
+        ticks / DWT_TICKS_PER_500NS
     }
 }

@@ -1,8 +1,10 @@
 #![no_std]
 
-use maps::TcuNum;
+use tcu_num::TcuNum;
 pub mod egs_timers;
+pub mod filters;
 pub mod maps;
+pub mod tcu_num;
 
 /// Interp between 2 values, where `val` is located somewhere on the
 /// X axis (Between `x1` and `x2`) and the output is between `y1` and `y2`
@@ -44,6 +46,13 @@ pub fn interp_linear<X: TcuNum, Y: TcuNum>(val: impl Into<f32>, x1: X, x2: X, y1
     }
 }
 
+/// Calculates the percentate (from 0-100) of a number between 2 other numbers.
+/// This is used for linear interpolation.
+///
+/// Start and end can be either ascending or descending.
+///
+/// # Returns
+/// * Percentage of [current] between [start] and [end]
 pub const fn progress_between_targets(current: f32, start: f32, end: f32) -> f32 {
     (100.0 * (current - start)) / (end - start)
 }
@@ -51,6 +60,11 @@ pub const fn progress_between_targets(current: f32, start: f32, end: f32) -> f32
 pub fn first_order_filter<T: TcuNum, F: TcuNum>(new_val: T, old_val: T, filter_factor: F) -> f32 {
     let denom: f32 = filter_factor.into() + 1.0;
     (new_val.into() + (filter_factor.into() * old_val.into())) / denom
+}
+
+pub fn first_order_filter_i32(new_val: i32, old_val: i32, filter_factor: u8) -> i32 {
+    let denom: i32 = filter_factor.saturating_add(1) as _;
+    (new_val + (filter_factor as i32 * old_val)) / denom
 }
 
 pub fn search_value<const N: usize, T: TcuNum>(
@@ -120,5 +134,11 @@ pub mod math_tests {
         let x = [0, 10, 20i16];
         assert_eq!((1, 1), search_value(10i16, &x));
         assert_eq!((2, 2), search_value(20i16, &x));
+    }
+
+    #[test]
+    pub fn test_lookup_lt() {
+        let x = [0, 10, 20i16];
+        assert_eq!((0, 0), search_value(-5i16, &x));
     }
 }

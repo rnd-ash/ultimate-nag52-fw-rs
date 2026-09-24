@@ -1,5 +1,6 @@
 use core::{ptr::NonNull, sync::atomic::Ordering};
 
+use crate::{BS_EGS, Mono, ST_MIN_EGS};
 use atsamd_hal::{
     self,
     fugit::ExtU64,
@@ -13,14 +14,14 @@ use atsamd_hal::{
 };
 pub use automotive_diag::kwp2000::*;
 use cortex_m::peripheral::SCB;
+use diag_common::diag_core::{MemCfg, SecurityLevel, check_mem_addr};
 use diag_common::{
     BootloaderStayReason, MemoryRegion,
     hal_extensions::dsu::Dsu,
+    qspi_driver::QspiStorage,
     ram_info::BootloaderRamInfo,
     smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info},
 };
-
-use crate::{BS_EGS, Mono, ST_MIN_EGS};
 
 #[derive(Copy, Clone)]
 pub enum PendingOperation {
@@ -31,36 +32,27 @@ pub enum PendingOperation {
         total_sectors: u32,
         current: u32,
     },
+    QspiErase {
+        start: u32,
+        total_sectors: u32,
+        current: u32,
+    },
     Flashing {
         blk_id: u8,
         current_addr: u32,
-        use_compression: bool
+        use_compression: bool,
     },
 }
 
 #[derive(Copy, Clone)]
 pub enum CompletedOperation {
     FlashErase(Result<(), nvm::Error>),
+    QspiErase(bool),
 }
 
 pub const P2_MAX_MS: u64 = 2500;
 
 const DEFAULT_SEC_MODE: SecurityLevel = SecurityLevel::FullUnlocked;
-
-#[repr(u8)]
-#[derive(defmt::Format, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SecurityLevel {
-    Default = 1,
-    Write = 3,
-    Read = 5,
-    FullUnlocked = 0xFE,
-}
-
-impl SecurityLevel {
-    pub fn get_seed_key(&self, _trng: &Trng) -> SecuritySeedKey {
-        todo!()
-    }
-}
 
 #[repr(u8)]
 #[derive(defmt::Format, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,9 +71,10 @@ pub struct KwpServer {
     completed_operation: Option<CompletedOperation>,
     nvm: Nvm,
     dsu: Dsu,
+    qspi: QspiStorage,
     last_cmd_time: u64,
     sec_level: SecurityLevel,
-    flash_size: u32,
+    flash_config: MemCfg,
     old_bl_info: BootloaderRamInfo,
     bl_reason: BootloaderStayReason,
     _rnd: Trng,
@@ -101,6 +94,7 @@ impl KwpServer {
         nvm: Nvm,
         rnd: Trng,
         dsu: Dsu,
+        qspi: QspiStorage,
         bootloader_ram_info: BootloaderRamInfo,
         bl_reason: BootloaderStayReason,
     ) -> Self {
@@ -113,61 +107,26 @@ impl KwpServer {
             flash_buf: [0; 4096],
             nvm,
             dsu,
+            qspi,
             last_cmd_time: 0,
             sec_level: DEFAULT_SEC_MODE,
-            flash_size,
+            flash_config: MemCfg {
+                flash_size,
+                qspi_size: 0,
+            },
             old_bl_info: bootloader_ram_info,
             bl_reason,
             _rnd: rnd,
         }
     }
-    pub fn check_addr(&mut self, v: u32, reading: bool) -> Result<(), KwpError> {
-        let (min_sec_level, can_read) = match v {
-            // Code space (Bootloader)
-            0x00000000..0x00010000 => (SecurityLevel::FullUnlocked, true),
-            // Code space (Application)
-            //0x00010000..0x00100000 => (SecurityLevel::AppRead, true),
-            x if (0x00010000..self.flash_size).contains(&x) => {
-                let min = if reading {
-                    SecurityLevel::Read
-                } else {
-                    SecurityLevel::Write
-                };
-                (min, true)
-            }
-            // CMCC
-            0x03000000..0x04000000 => (SecurityLevel::FullUnlocked, true),
-            // QSPI disabled (So not allowed to read)
-            // RAM
-            0x20000000..0x20040000 => (SecurityLevel::Read, true),
-            // AHB-APB Bridge A
-            0x40000000..0x40004000 => (SecurityLevel::FullUnlocked, true),
-            // AHB-APB Bridge B
-            0x41000000..0x4100C000 => (SecurityLevel::FullUnlocked, true),
-            0x4100E000..0x41010000 => (SecurityLevel::FullUnlocked, true),
-            0x41012000..0x4101E000 => (SecurityLevel::FullUnlocked, true),
-            0x41020000..0x41022000 => (SecurityLevel::FullUnlocked, true),
-            // AHB-APB Bridge C
-            0x42000000..0x42003C00 => (SecurityLevel::FullUnlocked, true),
-            // AHB-APB Bridge D
-            0x43000000..0x43003000 => (SecurityLevel::FullUnlocked, true),
-            // Other AHB-APB systems
-            0x44000000..0x48000000 => (SecurityLevel::FullUnlocked, true),
-            // System
-            0xE0000000..0xE000F000 => (SecurityLevel::FullUnlocked, true),
-            0xE00FF000..0xE0100000 => (SecurityLevel::FullUnlocked, true),
-            _ => (SecurityLevel::Default, false),
-        };
-        if !can_read {
-            Err(KwpError::RequestOutOfRange)
-        } else if self.sec_level < min_sec_level {
-            Err(KwpError::SecurityAccessDenied)
-        } else {
-            Ok(())
-        }
-    }
 
     pub async fn update(&mut self, now_ms: u64) -> Option<&[u8]> {
+        if self.qspi.size_bytes().is_none() {
+            self.qspi.init_chip(&mut Mono).await;
+            if let Some(size) = self.qspi.size_bytes() {
+                self.flash_config.qspi_size = size;
+            }
+        }
         if now_ms - self.last_cmd_time > P2_MAX_MS && self.mode != KwpSessionType::Normal {
             defmt::debug!("Tester timeout. Going back to default mode");
             self.mode = KwpSessionType::Normal;
@@ -196,6 +155,34 @@ impl KwpServer {
                     Err(e) => {
                         self.pending_operation = PendingOperation::None;
                         self.completed_operation = Some(CompletedOperation::FlashErase(Err(e)));
+                    }
+                }
+                None
+            }
+            PendingOperation::QspiErase {
+                start,
+                total_sectors,
+                current,
+            } => {
+                const BLOCK_32_KB: u32 = 32 * 1024;
+                let addr = *start + (4096 * *current);
+                // We can speed this up by doing 32K erase if possible
+                let (res, inc) = if addr % BLOCK_32_KB == 0 && (*total_sectors - *current) >= 8 {
+                    (self.qspi.erase_32k_block(addr, &mut Mono).await, 8)
+                } else {
+                    (self.qspi.erase_4k_sector(addr, &mut Mono).await, 1)
+                };
+                match res {
+                    true => {
+                        *current += inc;
+                        if *total_sectors == *current {
+                            self.pending_operation = PendingOperation::None;
+                            self.completed_operation = Some(CompletedOperation::QspiErase(true))
+                        }
+                    }
+                    false => {
+                        self.pending_operation = PendingOperation::None;
+                        self.completed_operation = Some(CompletedOperation::QspiErase(false));
                     }
                 }
                 None
@@ -306,16 +293,28 @@ impl KwpServer {
         } else {
             let len: usize = cmd[1] as usize;
             let addr = u32::from_le_bytes(cmd[2..6].try_into().unwrap());
-            self.check_addr(addr, true)?;
-            self.check_addr(addr + len as u32 - 1, true)?;
-
-            unsafe {
-                let mut buf = [0u8; 0xFF];
-                let dest_ptr = buf.as_mut_ptr();
-
-                let ptr = core::ptr::NonNull::new_unchecked(addr as *mut u8);
-                ptr.copy_to_nonoverlapping(NonNull::new_unchecked(dest_ptr), len);
+            check_mem_addr(self.flash_config, self.sec_level, addr, true)?;
+            check_mem_addr(
+                self.flash_config,
+                self.sec_level,
+                addr + len as u32 - 1,
+                true,
+            )?;
+            // QSPI handling
+            if (0x04000000u32..0x05000000).contains(&addr) {
+                let mut buf = [0; 0xFF];
+                let b_addr = addr - 0x04000000u32;
+                self.qspi.read(b_addr, &mut buf[..len]);
                 Ok(self.make_positive_reply(cmd[0], &buf[..len]))
+            } else {
+                unsafe {
+                    let mut buf = [0u8; 0xFF];
+                    let dest_ptr = buf.as_mut_ptr();
+
+                    let ptr = core::ptr::NonNull::new_unchecked(addr as *mut u8);
+                    ptr.copy_to_nonoverlapping(NonNull::new_unchecked(dest_ptr), len);
+                    Ok(self.make_positive_reply(cmd[0], &buf[..len]))
+                }
             }
         }
     }
@@ -508,23 +507,49 @@ impl KwpServer {
 
             if start_addr == MemoryRegion::Bootloader.range_exclusive().start {
                 start_addr = MemoryRegion::Application.range_exclusive().start;
-            } else if start_addr >= MemoryRegion::Application.range_exclusive().start {
+            } else if start_addr >= MemoryRegion::Application.range_exclusive().start
+                && start_addr < MemoryRegion::QspiFlash.range_exclusive().start
+            {
                 // Mark app as erased now
                 let mut eeprom = smart_eeprom(&mut self.nvm);
                 mutate_smarteeprom_info(&mut eeprom, |info| {
                     info.app_flashing_not_done = 0xFF;
                     info.crc32_app = 0xFFFF_FFFF
                 });
+            } else if MemoryRegion::QspiFlash
+                .range_exclusive()
+                .contains(&start_addr)
+            {
+                // Check that QSPI was initialized
+                if self.flash_config.qspi_size == 0 {
+                    return Err(KwpError::ConditionsNotCorrectRequestSequenceError);
+                }
+                // QSPI operation
+                if start_addr % 4096 != 0 {
+                    return Err(KwpError::SubFunctionNotSupportedInvalidFormat);
+                }
             } else {
                 return Err(KwpError::RequestOutOfRange);
             }
 
-            // Do routine
-            self.pending_operation = PendingOperation::FlashErase {
-                start: start_addr,
-                total_sectors: num_blocks as u32,
-                current: 0,
-            };
+            if MemoryRegion::QspiFlash
+                .range_exclusive()
+                .contains(&start_addr)
+            {
+                // Do routine
+                self.pending_operation = PendingOperation::QspiErase {
+                    start: start_addr - MemoryRegion::QspiFlash.start_addr(),
+                    total_sectors: (num_blocks * 2) as u32, // Convert to 4K Sector sizes
+                    current: 0,
+                };
+            } else {
+                // Do routine
+                self.pending_operation = PendingOperation::FlashErase {
+                    start: start_addr,
+                    total_sectors: num_blocks as u32,
+                    current: 0,
+                };
+            }
             Ok(self.make_positive_reply(cmd[0], &[cmd[1]]))
         } else if cmd[1] == 0xE1 {
             // Flash check routine [CRC32, Start Addr (4), End Addr (4)]
@@ -542,8 +567,8 @@ impl KwpServer {
             }
 
             // Just check that addrs are valid
-            self.check_addr(start_addr, false)?;
-            self.check_addr(start_addr + len, false)?;
+            check_mem_addr(self.flash_config, self.sec_level, start_addr, false)?;
+            check_mem_addr(self.flash_config, self.sec_level, start_addr + len, false)?;
             let result = self.dsu.crc32(start_addr, len).unwrap_or(0);
             if result == targ_crc {
                 let mut eeprom = smart_eeprom(&mut self.nvm);
@@ -610,6 +635,11 @@ impl KwpServer {
                         Ok(self.make_positive_reply(cmd[0], &[0xE0, 0x00]))
                     }
                 }
+                (0xE0, CompletedOperation::QspiErase(ok)) => {
+                    let res_byte = !*ok;
+                    self.completed_operation = None;
+                    Ok(self.make_positive_reply(cmd[0], &[0xE0, res_byte as u8]))
+                }
                 _ => Err(KwpError::ConditionsNotCorrectRequestSequenceError),
             }
         } else {
@@ -634,9 +664,7 @@ impl KwpServer {
 
             if addr == MemoryRegion::Bootloader.start_addr() {
                 addr = MemoryRegion::BootloaderScratch.start_addr();
-            } else if fmt > 1
-                || !app_region.contains(&addr)
-                || !app_region.contains(&(addr + size))
+            } else if fmt > 1 || !app_region.contains(&addr) || !app_region.contains(&(addr + size))
             {
                 return Err(KwpError::SubFunctionNotSupportedInvalidFormat);
             }
@@ -646,7 +674,7 @@ impl KwpServer {
             self.pending_operation = PendingOperation::Flashing {
                 blk_id: 0,
                 current_addr: addr,
-                use_compression: fmt != 0
+                use_compression: fmt != 0,
             };
             Ok(self.make_positive_reply(cmd[0], &bs))
         }
@@ -656,7 +684,7 @@ impl KwpServer {
         if let PendingOperation::Flashing {
             blk_id,
             current_addr,
-            use_compression
+            use_compression,
         } = &mut self.pending_operation
         {
             if cmd.len() > 2 {
@@ -665,7 +693,9 @@ impl KwpServer {
                 if req_blk_id == *blk_id {
                     let addr = *current_addr as *mut u32;
                     if *use_compression {
-                        if let Ok(decoded) = heatshrink::decoder::decode(&cmd[2..], &mut self.flash_buf) {
+                        if let Ok(decoded) =
+                            heatshrink::decoder::decode(&cmd[2..], &mut self.flash_buf)
+                        {
                             data_size = decoded.len();
                             if !data_size.is_multiple_of(4) {
                                 return Err(KwpError::TransferSuspended)?;

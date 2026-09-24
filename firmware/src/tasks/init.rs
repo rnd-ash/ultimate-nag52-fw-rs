@@ -1,60 +1,58 @@
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::AtomicU8;
 
-use crate::diag::{KwpServer, PerfStatsTracker};
-use crate::egs_logic_impl::TickCounter;
-use crate::hal_extension::evsys;
+use crate::diag::{DiagEntry, KwpServer, PerfStatsTracker};
+use crate::egs_logic_impl::{
+    EgsAdpStorage, EgsCalStorage, EgsDtcStorage, EgsMapStorage, V2Gearbox,
+};
+use crate::hal_extension::{self, evsys};
+use crate::sensors::AdcData;
 use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
 use crate::sensors::speed_sensors::{AllSpeedSensors, IntN2RpmPc, IntN3RpmPc, init_speed_sensor};
 use crate::sensors::variable_adc_input::VariableAdcInput;
-use crate::sensors::{AdcData, SensorData};
-use crate::solenoids::SolenoidControler;
+use crate::solenoids::SolenoidController;
 use crate::solenoids::tcc_sol::TccSol;
 use crate::solenoids::tle8242::{TLE_SPI_BAUD, Tle8242, Tle8242Pins};
-use crate::storage::eeprom::Eeprom;
 use crate::usb::UsbData;
 use crate::{
-    CAN_ID_DIAG_RX, CAN_ID_DIAG_TX, DmacIrqs, Mono, Sercom2Irqs, Sercom6Irqs, app, create_code_info,
+    CAN_ID_DIAG_RX, CAN_ID_DIAG_TX, DmacIrqs, Mono, Sercom2Irqs, Sercom6Irqs, app,
+    create_code_info, new_diag_entry,
 };
 
-use app::async_init::Context as AsyncInitContext;
 use app::init::Context as InitContext;
 use app::{Resources, Shared};
 use atsamd_hal::can::Dependencies;
+use atsamd_hal::clock::v2::ahb::Ahb;
 use atsamd_hal::clock::v2::dfll::FromUsb;
 use atsamd_hal::clock::v2::dpll::Dpll;
 use atsamd_hal::clock::v2::gclk::{Gclk, GclkDiv8, GclkDiv16};
 use atsamd_hal::clock::v2::osculp32k::OscUlp32k;
 use atsamd_hal::clock::v2::pclk::Pclk;
 use atsamd_hal::clock::v2::rtcosc::RtcOsc;
-use atsamd_hal::clock::v2::{Source, clock_system_at_reset, pclk};
+use atsamd_hal::clock::v2::{Source, clock_system_at_reset};
 use atsamd_hal::dmac::{self, DmaController, PriorityLevel};
 use atsamd_hal::eic::Eic;
-use atsamd_hal::fugit::{ExtU64, HertzU32, RateExtU32};
+use atsamd_hal::fugit::{HertzU32, RateExtU32};
 use atsamd_hal::nvm::Nvm;
 use atsamd_hal::nvm::smart_eeprom::SmartEepromMode;
-use atsamd_hal::prelude::_atsamd_hal_embedded_hal_digital_v2_OutputPin;
-use atsamd_hal::rtic_time::Monotonic;
 use atsamd_hal::serial_number;
-use atsamd_hal::timer::TimerCounter7;
 use atsamd_hal::usb::UsbBus;
 use atsamd_hal::usb::usb_device::bus::UsbBusAllocator;
 use atsamd_hal::usb::usb_device::device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid};
 use atsamd_hal::watchdog::Watchdog;
-use bsp::can_deps::{self, Capacities};
+use bsp::can_deps::{self};
 use cortex_m::prelude::_embedded_hal_watchdog_Watchdog;
-use diag_common::hal_extensions::dsu::Dsu;
+use diag_common::hal_extensions::qspi_async::Qspi;
 use diag_common::isotp_endpoints::can_isotp::make_isotp_endpoint;
 use diag_common::isotp_endpoints::usb_isotp::new_usb_isotp;
+use diag_common::qspi_driver::QspiStorage;
 use diag_common::smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info};
 use diag_common::{DefmtTarget, defmt_multi_output};
-use egs_logic::GearboxOutputs;
 use egs_logic::egs_can::egs52::Egs52Can;
 use egs_logic::egs_can::slave::SlaveCan;
 use egs_logic::egs_can::{CanLayerTy, SignalFrame, slave_mode};
 use heapless::format;
 use mcan::embedded_can::{Id, StandardId};
 use rtic_sync::arbiter::Arbiter;
-use rtic_sync::portable_atomic::AtomicU16;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 use mcan::filter::Filter as McanFilter;
@@ -62,6 +60,7 @@ use mcan::interrupt::Interrupt as McanInterrupt;
 
 pub fn init(cx: InitContext) -> (Shared, Resources) {
     defmt_multi_output::init();
+
     let mut device = cx.device;
     let _core: rtic::export::Peripherals = cx.core;
     let pins = bsp::Pins::new(device.port);
@@ -77,6 +76,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
 
     // Enable watchdog alarm
     let mut wdt = Watchdog::new(device.wdt);
+    //wdt.disable();
     wdt.feed();
 
     // Obeying the max clock speeds for 125C operation (For AEC-Q100),
@@ -93,8 +93,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
     //     │   ├── DPLL0(100Mhz)
     //     C   │   └── GCLK0(100Mhz)
     //     L   │       ├── TCC2 (TCC Solenoid)
-    //     K   │       ├── TC7 (HPET Timer)
-    //     │   │       └── F_CPU
+    //     K   │       └── F_CPU
     //     │   │           └── QSPI
     //     R   └── DPLL1(160Mhz)
     //     E       ├── GCLK2(40Mhz)
@@ -116,7 +115,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
     // DPLL0 loop div 50 = 100Mhz
     // DPLL1 loop div 80 = 160Mhz
     let (clk_dpll0, gclk1) = Pclk::enable(tokens.pclks.dpll0, gclk1);
-    let (clk_dpll1, gclk1) = Pclk::enable(tokens.pclks.dpll1, gclk1);
+    let (clk_dpll1, _gclk1) = Pclk::enable(tokens.pclks.dpll1, gclk1);
     // DPLL0 at 100Mhz (2*50)
     let dpll0 = Dpll::from_pclk(tokens.dpll0, clk_dpll0)
         .loop_div(50, 0)
@@ -222,10 +221,6 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
     let dma_ch1 = dma_channels.1.init(PriorityLevel::Lvl0); // TLE8242 SPI
     let dma_ch2 = dma_channels.2.init(PriorityLevel::Lvl0); // EEPROM I2C
 
-    let (tc67_clock, gclk0_100) = Pclk::enable(tokens.pclks.tc6_tc7, gclk0_100);
-    let apb_tc7 = buses.apb.enable(tokens.apbs.tc7);
-    let hpet = TickCounter::new();
-
     let (tcc01_clock, _gclk4_160) = Pclk::enable(tokens.pclks.tcc0_tcc1, gclk4_160);
     let tcc01_clock_compat = tcc01_clock.into();
     // Much better resolution to run this at 100Mhz vs 160Mhz
@@ -295,16 +290,24 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
 
     let dsu_pac = diag_common::hal_extensions::dsu::Dsu::new(device.dsu, &device.pac).unwrap();
     let dsu = cx.local.dsu_init.insert(Arbiter::new(dsu_pac));
-
     let eeprom = crate::storage::eeprom::Eeprom::new(i2c, dsu);
 
-    let solenoid_io = SolenoidControler::new(tle8242, pins.power_en_sol.into());
+    // -- QSPI init -- //
 
-    // Enable sensor power supply (Testing)
-    pins.power_en_sensors
-        .into_push_pull_output()
-        .set_high()
-        .unwrap();
+    let qspi_raw = Qspi::new(
+        &mut mclk,
+        device.qspi,
+        pins.extflash_sck,
+        pins.extflash_cs,
+        pins.extflash_data0,
+        pins.extflash_data1,
+        pins.extflash_data2,
+        pins.extflash_data3,
+    );
+    let qspi_sto = QspiStorage::new(qspi_raw, pins.led_qspi.into());
+    let qspi = cx.local.qspi_init.insert(Arbiter::new(qspi_sto));
+
+    let solenoid_io = SolenoidController::new(tle8242, pins.power_en_sol.into());
 
     // Speed sensors init
     let (pclk_tc01, gclk3_80) = Pclk::enable(tokens.pclks.tc0_tc1, gclk3_80);
@@ -467,28 +470,41 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
         isotp: isotp_usb_tx,
     };
 
-    // Start HPET
+    let _dg: DiagEntry = new_diag_entry!(0x05, cx.local.inputs.clock_time_us);
 
-    app::async_init::spawn(dsu, arbiter_cantx, eeprom, solenoid_io)
-        .unwrap_or_else(|_| panic!("Could not start async init"));
+    let gearbox = V2Gearbox::new(
+        cx.local.inputs,
+        cx.local.vars,
+        cx.local.outputs,
+        EgsDtcStorage::default(),
+        EgsCalStorage::default(),
+        EgsMapStorage::default(),
+        EgsAdpStorage::default(),
+    );
+
+    // Start HPET
+    app::async_init::spawn(dsu, qspi).unwrap_or_else(|_| panic!("Could not start async init"));
     app::perf_monitor::spawn(gclk0_100.freq().raw()).unwrap();
+    app::sensor_query::spawn().unwrap();
+    app::gearbox_task::spawn(arbiter_cantx, solenoid_io, eeprom)
+        .unwrap_or_else(|_| panic!("Could not start gearbox init"));
+    app::diag_task::spawn().unwrap();
 
     wdt.feed();
     (
         Shared {
+            log_mode: AtomicU8::new(0),
             usb_data,
-            wdt,
             can_layer,
             slave_can: slave_layer,
             soltcc: sol_tcc,
-            sensor_data: SensorData::default(),
-            cpu_idle_ticks: AtomicU32::new(0),
-            hw_interrupts: AtomicU32::new(0),
-            wakeups: AtomicU32::new(0),
-            device_mode: AtomicU16::new(0),
+            sensor_data: cx.local.sensor_data,
+            perf_info: Default::default(),
             dsu,
             perf_stats: PerfStatsTracker::default(),
-            outputs: GearboxOutputs::default(),
+            gearbox,
+            solenoid_statuses: Default::default(),
+            qspi,
         },
         Resources {
             adc_data,
@@ -499,31 +515,8 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             isotp_isr,
             isotp_thread,
             usb_isotp_thread: isotp_usb_thread,
-            diag_server: KwpServer::new(dsu),
-            hpet,
+            diag_server: KwpServer::new(dsu, qspi),
+            wdt,
         },
     )
-}
-
-pub async fn async_init(
-    _ctx: AsyncInitContext<'_>,
-    dsu: &'static Arbiter<Dsu>,
-    can_tx: &'static Arbiter<mcan::tx_buffers::Tx<'static, pclk::ids::Can0, Capacities>>,
-    mut eeprom: Eeprom<dmac::Ch2>,
-    mut solenoid_io: SolenoidControler<dmac::Ch0, dmac::Ch1>,
-) {
-    app::sensor_query::spawn().unwrap();
-    eeprom.init().await;
-    solenoid_io.init().await;
-    app::gearbox_task::spawn(can_tx, solenoid_io)
-        .unwrap_or_else(|_| panic!("Could not start async init"));
-    app::diag_task::spawn().unwrap();
-    // Wait 5 seconds - Most likely a crash will happen whilst all the async tasks
-    // are initializing
-    Mono::delay(5000u64.millis()).await;
-    // Now reset the reset counter
-    let mut dsu_lock = dsu.access().await;
-    diag_common::ram_info::modify_bootloader_info(&mut dsu_lock, |info| {
-        info.reset_counter = 0;
-    });
 }

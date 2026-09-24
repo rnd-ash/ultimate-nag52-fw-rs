@@ -125,12 +125,14 @@ mod app {
     use automotive_diag::kwp2000::KwpSessionType;
     use bsp::can_deps::CAN_TX_MAILBOX_DIAG;
     use diag_common::{
-        BootloaderStayReason, hal_extensions,
+        BootloaderStayReason,
+        hal_extensions::{self, qspi_async::Qspi},
         isotp_endpoints::{
             SharedIsoTpBuf,
             can_isotp::{IsoTpInterruptHandler, IsotpConsumer, IsotpCtsMsg, make_isotp_endpoint},
             usb_isotp::{UsbIsoTpConsumer, new_usb_isotp},
         },
+        qspi_driver::QspiStorage,
         smarteeprom::mutate_smarteeprom_info,
     };
     use usbd_serial::DefaultBufferStore;
@@ -428,6 +430,21 @@ mod app {
             isotp: isotp_usb_tx,
         };
 
+        // QSPI Init
+        let qspi = QspiStorage::new(
+            Qspi::new(
+                &mut mclk,
+                device.qspi,
+                pins.extflash_sck,
+                pins.extflash_cs,
+                pins.extflash_data0,
+                pins.extflash_data1,
+                pins.extflash_data2,
+                pins.extflash_data3,
+            ),
+            pins.led_qspi.into(),
+        );
+
         // LED status init (Pulsing)
         let (clock_tcc0, _gclk2_48) = Pclk::enable(tokens.pclks.tcc0_tcc1, gclk2_48);
         let pinout_led = TCC0Pinout::Pd12(pins.led_stat_err); // WO5
@@ -442,7 +459,7 @@ mod app {
         );
 
         let trng = Trng::new(&mut mclk, device.trng);
-        let mut server = KwpServer::new(nvm, trng, dsu, old_bootloader_info, reset_reason);
+        let mut server = KwpServer::new(nvm, trng, dsu, qspi, old_bootloader_info, reset_reason);
         if start_diag_in_reprog_mode {
             server.mode = KwpSessionType::Reprogramming;
         }
@@ -513,15 +530,34 @@ mod app {
 
     #[task(priority = 2, local=[tcc_led])]
     async fn led_task(cx: led_task::Context) {
-        const DELAY_MS: u64 = 20;
+        const DELAY_MS: u64 = 10;
+        let max_r = cx.local.tcc_led.get_max_duty();
 
-        let mut i: u32 = 0;
-        let max = cx.local.tcc_led.get_max_duty() / 4;
-        let step = max as u64 / (2000 / DELAY_MS);
+        let mut r: u32 = max_r;
+
+        let step_r = max_r as u64 / (2000 / DELAY_MS);
+        let mut down = false;
         loop {
-            cx.local.tcc_led.set_duty(Channel::_0, i % max);
-            cx.local.tcc_led.set_duty(Channel::_5, max - (i % max));
-            i = i.wrapping_add(step as u32);
+            fn correct_brightness(i: u32, max: u32) -> u32 {
+                (i * i) / max
+            }
+            cx.local
+                .tcc_led
+                .set_duty(Channel::_5, correct_brightness(r, max_r));
+
+            if down {
+                if let Some(new) = r.checked_sub(step_r as u32) {
+                    r = new;
+                } else {
+                    down = false;
+                }
+            } else {
+                if r + step_r as u32 > max_r {
+                    down = true;
+                } else {
+                    r += step_r as u32;
+                }
+            }
             Mono::delay(DELAY_MS.millis()).await;
         }
     }

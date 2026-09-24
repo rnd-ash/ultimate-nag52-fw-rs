@@ -43,3 +43,4 @@ static_assertions = "1.1.0"
 konst = { version = "0.4.1", features = ["iter"] }
 bsp = { path = "../bsp" }
 rtt-target = "0.6.2"
+critical-section = "1.2.0"

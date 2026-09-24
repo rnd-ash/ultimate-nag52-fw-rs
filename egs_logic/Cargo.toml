@@ -8,3 +8,5 @@ defmt = {workspace=true}
 bitflags = "2.12.1"
 egs_can = {path="../egs_can"}
 egs_maths = {path="../egs_maths"}
+derived = "0.4.2"
+pastey = "0.2.3"

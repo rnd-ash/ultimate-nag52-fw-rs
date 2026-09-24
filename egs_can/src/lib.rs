@@ -1,7 +1,6 @@
 #![no_std]
 
 mod can_matrix;
-
 use arbitrary_int::traits::{BuiltinInteger, UnsignedInteger};
 pub use can_matrix::*;
 use embedded_can::StandardId;
@@ -11,8 +10,6 @@ use crate::egs52::Egs52Can;
 mod bit_checking;
 pub mod egs52;
 pub mod slave;
-
-use pastey::paste;
 
 /// Rx frame with timeout
 ///
@@ -73,7 +70,7 @@ impl $struct_name {
         }
     }
 }
-        
+
         }
     }
 }
@@ -144,7 +141,7 @@ pub trait CanLayer<I, O> {
     ) -> nb::Result<(), E>;
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum CanTargGear {
     N,
     _1,
@@ -160,7 +157,7 @@ pub enum CanTargGear {
     Abort,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum ShifterPosSimple {
     P,
     R,
@@ -189,7 +186,7 @@ pub enum ShiftPaddlePos {
     Minus,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum CanActualGear {
     N,
     _1,
@@ -205,7 +202,7 @@ pub enum CanActualGear {
     PowerFree,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum DisplayGear {
     Blank,
     _1,
@@ -222,7 +219,7 @@ pub enum DisplayGear {
     R,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum EcuReqGear {
     _1,
     _2,
@@ -231,7 +228,7 @@ pub enum EcuReqGear {
     _5,
 }
 
-#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum DisplayProfile {
     A,
     C,
@@ -247,7 +244,7 @@ pub enum DisplayProfile {
     Downshift,
 }
 
-#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum TccState {
     #[default]
     Open,
@@ -259,7 +256,7 @@ pub enum TccState {
     Closed,
 }
 
-#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum AgileMode {
     Sports,
     Comfort,
@@ -268,7 +265,7 @@ pub enum AgileMode {
     Snv,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct TorqueRequest {
     pub amount_nm: f32,
     pub ramp_end: bool,
@@ -317,7 +314,7 @@ impl CanLayerTy {
 }
 
 /// Data that is sent over CAN to the vehicle
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, Debug)]
 pub struct CanTxData {
     pub can_start: bool,
     pub gearbox_ok: bool,
@@ -344,6 +341,35 @@ pub struct CanTxData {
     pub gearbox_temperature_c: i16,
 }
 
+impl CanTxData {
+    pub const fn new() -> Self {
+        Self {
+            can_start: false,
+            gearbox_ok: false,
+            manual_shifting: false,
+            high_resistance: false,
+            garage_shifting: false,
+            overtemperature: false,
+            kickdown_active: false,
+            req_mil_light: false,
+            fourmatic: false,
+            large_nag: false,
+            activate_brake_when_shifting: false,
+            display_info: None,
+            gear_info: None,
+            shifter_pos: None,
+            tcc_position: TccState::Open,
+            torque_req: None,
+            agile_mode: AgileMode::Snv,
+            creep_torque_nm: 0,
+            loss_torque_nm: 0,
+            input_rpm: 0,
+            output_rpm: 0,
+            gearbox_temperature_c: 0,
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct WheelSpeeds {
     pub fr: CanResult<u16>,
@@ -352,8 +378,8 @@ pub struct WheelSpeeds {
     pub rl: CanResult<u16>,
 }
 
-impl Default for WheelSpeeds {
-    fn default() -> Self {
+impl WheelSpeeds {
+    pub const fn new() -> Self {
         Self {
             fr: Err(CanError::MissingMsg),
             fl: Err(CanError::MissingMsg),
@@ -367,8 +393,7 @@ impl Default for WheelSpeeds {
 pub struct TorqueOutputInfo {
     pub trq_req_ack: bool,
     pub driver_req_torque_nm: CanResult<f32>,
-    pub static_torque_nm: CanResult<f32>,
-    pub indicated_torque_nm: CanResult<f32>,
+    pub engine_output_torque_nm: CanResult<f32>,
     pub min_torque_nm: CanResult<f32>,
     pub max_torque_nm: CanResult<f32>,
 }
@@ -378,8 +403,7 @@ impl Default for TorqueOutputInfo {
         Self {
             trq_req_ack: false,
             driver_req_torque_nm: Err(CanError::MissingMsg),
-            static_torque_nm: Err(CanError::MissingMsg),
-            indicated_torque_nm: Err(CanError::MissingMsg),
+            engine_output_torque_nm: Err(CanError::MissingMsg),
             min_torque_nm: Err(CanError::MissingMsg),
             max_torque_nm: Err(CanError::MissingMsg),
         }
@@ -402,11 +426,11 @@ pub struct CanRxData {
     pub engine_indicated_torque_nm: CanResult<f32>,
 }
 
-impl Default for CanRxData {
-    fn default() -> Self {
+impl CanRxData {
+    pub const fn new() -> Self {
         Self {
             engine_rpm: Err(CanError::MissingMsg),
-            wheel_speeds: Default::default(),
+            wheel_speeds: WheelSpeeds::new(),
             ewm_position: Err(CanError::MissingMsg),
             pedal_pos: Err(CanError::MissingMsg),
             kickdown: Err(CanError::MissingMsg),

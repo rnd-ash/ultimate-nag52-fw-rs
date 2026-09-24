@@ -14,7 +14,6 @@ use atsamd_hal::{
     time::Hertz,
 };
 use bsp::{LedTle, TleClk, TleCs, TleEn, TleFault, TlePhaseSync, TleReset, TleSpiPads};
-use defmt::println;
 
 use crate::{
     Mono,
@@ -66,6 +65,12 @@ pub struct TleConfiguration {
     diag_tmr: DiagnosticTimer,
 }
 
+#[derive(Copy, Clone)]
+pub enum ChannelReq {
+    Current(u32),
+    Pwm(f32),
+}
+
 impl TleConfiguration {
     pub fn with_props(mut self, channel: TleChannel, props: ChannelProps) -> Self {
         self.channel_settings[channel as usize] = Some((channel, props));
@@ -83,6 +88,7 @@ pub struct Tle8242<T: dmac::ChId, R: dmac::ChId> {
     pin_cs: TleCs,
     pin_led: LedTle,
     config: TleConfiguration,
+    version: IcVersion,
 }
 
 impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
@@ -108,10 +114,11 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
             pin_cs: pins.cs,
             pin_led: pins.led,
             config: Default::default(),
+            version: IcVersion::new_with_id(),
         }
     }
 
-    pub async fn init(&mut self, settings: TleConfiguration) {
+    pub async fn init(&mut self, settings: TleConfiguration) -> Result<(), TleError> {
         self.pin_cs.set_high().unwrap();
         self.pin_reset.set_low().unwrap();
         self.pin_enable.set_low().unwrap();
@@ -126,9 +133,7 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
 
         // Sanity check - Get version info
         let tle_ver = IcVersion::new_with_id();
-        if self.xfer(tle_ver).await.is_none() {
-            // TODO - Panic or stop init if this happens (TLE is not responding)
-        }
+        self.version = self.write_read(tle_ver).await?;
 
         // Now prepare to configure the channels
         let mut cfg_fault_msg = CtrlMethodFaultMaskCfg::new_with_id()
@@ -144,7 +149,7 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
                 .with_channel_id(tle_chan)
                 .with_divider_m(channel.mode.div_m())
                 .with_divider_n(u14::from_u16(channel.mode.div_n()));
-            self.xfer(mps_msg).await;
+            self.write_read(mps_msg).await?;
             // Kp, Ki and dither config for constant current mode channels
             if let Mode::ConstantCurrent {
                 kp,
@@ -158,13 +163,13 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
                     .with_channel_id(tle_chan)
                     .with_ki(u12::from_u16(ki))
                     .with_kp(u12::from_u16(kp));
-                self.xfer(kpki_msg).await;
+                self.write_read(kpki_msg).await?;
                 if let Some(dither_opts) = dither_opts {
                     let dither_period_msg = DitherPeriodSet::new_with_id()
                         .with_channel_id(tle_chan)
                         .with_write(true)
                         .with_number_of_steps(u5::from_u8(dither_opts.steps));
-                    self.xfer(dither_period_msg).await;
+                    self.write_read(dither_period_msg).await?;
                 }
             }
 
@@ -172,7 +177,7 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
             let msg = AutoZeroTriggerRead::new_with_id()
                 .with_write(true) // Write to perform autoZero
                 .with_channel_id(tle_chan);
-            self.xfer(msg).await;
+            self.write_read(msg).await?;
 
             // Set the fault configuration. This is the last msg sent
             // Note its 7-x since the channels are backwards (Higher bit = lower channel)
@@ -180,15 +185,20 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
             cfg_fault_msg.set_cmx(7 - idx, channel.mode.to_ctrl_mode());
         }
         // Send our fault configuration message
-        self.xfer(cfg_fault_msg).await;
+        self.write_read(cfg_fault_msg).await?;
         // Wait needed for autoZero to work
         Mono::delay(1u64.micros()).await;
 
         self.config = settings;
+        Ok(())
     }
 
     // TODO - Error out if invalid option
-    pub async fn set_channel_current(&mut self, channel: TleChannel, setpoint_val: u16) {
+    pub async fn set_channel_current(
+        &mut self,
+        channel: TleChannel,
+        setpoint_val: u16,
+    ) -> Result<(), TleError> {
         if let Some((_, props)) = self.config.channel_settings[channel as usize] {
             if let Mode::ConstantCurrent { dither_opts, .. } = props.mode {
                 let mut req_msg = CurrentDitherAmpSet::new_with_id()
@@ -198,14 +208,21 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
                 if let Some(dither_opts) = dither_opts {
                     req_msg = req_msg.with_dither_step_size(u11::from_u16(dither_opts.step_size))
                 }
-                self.xfer(req_msg).await;
+                self.write(req_msg).await
+            } else {
+                Err(TleError::InvalidChannelConfig)
             }
+        } else {
+            Err(TleError::InvalidChannelConfig)
         }
     }
 
-    // TODO - Error out if invalid option
     /// * percentage - Value from 0.0 to 1.0 representing PWM duty
-    pub async fn set_channel_pwm(&mut self, channel: TleChannel, percentage: f32) {
+    pub async fn set_channel_pwm(
+        &mut self,
+        channel: TleChannel,
+        percentage: f32,
+    ) -> Result<(), TleError> {
         if let Some((_, props)) = self.config.channel_settings[channel as usize] {
             if let Mode::Pwm { divm: _, divn } = props.mode {
                 let duty = percentage * (32.0 * divn as f32);
@@ -213,50 +230,78 @@ impl<T: dmac::ChId, R: dmac::ChId> Tle8242<T, R> {
                     .with_write(true)
                     .with_channel_id(channel)
                     .with_pwm(u19::from_u32(duty as u32));
-                self.xfer(req_msg).await;
+                self.write(req_msg).await.map(|_| ())
+            } else {
+                Err(TleError::InvalidChannelConfig)
             }
+        } else {
+            Err(TleError::InvalidChannelConfig)
         }
     }
 
     /// Returns current usage in Milliamps
-    pub async fn get_avg_current(&mut self, channel: TleChannel) -> Option<u32> {
+    pub async fn get_avg_current(&mut self, channel: TleChannel) -> Result<Option<u32>, TleError> {
         let msg = AverageCurrentRead::new_with_id().with_channel_id(channel);
-        let response = self.xfer(msg).await?;
+        let response = self.write_read(msg).await?;
         if response.valid() {
-            Some(response.avg().as_u32())
+            Ok(Some(response.avg().as_u32()))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    pub async fn xfer<M: TleMsg>(&mut self, msg: M) -> Option<M> {
+    pub async fn write_read<M: TleMsg>(&mut self, msg: M) -> Result<M, TleError> {
         // Note. Timing params (T1, T2, T3) delays are ignored
         //       the CPU is not fast enough to exceed these limits
+
+        let mut buf = msg.into().to_be_bytes();
+        // Write command
         self.pin_led.set_high().unwrap();
         self.pin_cs.set_low().unwrap();
-        let buf = msg.into().to_be_bytes();
-        let mut read_buf = [0xFF; 4];
-        // Write command
-        self.spi.transfer(&mut read_buf, &buf).await.ok()?;
+        self.spi.transfer_in_place(&mut buf).await?;
         self.pin_cs.set_high().unwrap();
-        if msg.is_read() {
-            self.pin_cs.set_low().unwrap();
-            self.spi
-                .transfer(&mut read_buf, &0u32.to_be_bytes())
-                .await
-                .ok()?;
-            self.pin_cs.set_high().unwrap();
-            self.pin_led.set_low().unwrap();
-            let resp_u32 = u32::from_be_bytes(read_buf);
-            if msg.id_match(resp_u32) {
-                Some(u32::from_be_bytes(read_buf).into())
-            } else {
-                defmt::error!("CMD ID Mismatch. Got {:02X}", read_buf);
-                None
-            }
+        Mono::delay(1u64.micros()).await;
+        // Start xfer of dummy msg to get the request response
+        self.pin_cs.set_low().unwrap();
+        self.spi.transfer_in_place(&mut buf).await?;
+        self.pin_cs.set_high().unwrap();
+        self.pin_led.set_low().unwrap();
+        let resp_u32 = u32::from_be_bytes(buf);
+        if msg.id_match(resp_u32) {
+            Ok(u32::from_be_bytes(buf).into())
         } else {
-            self.pin_led.set_low().unwrap();
-            None
+            defmt::error!(
+                "CMD ID Mismatch. Got {:02X}. Req: {:02X}",
+                buf,
+                msg.into().to_be_bytes()
+            );
+            Err(TleError::Mismatch)
         }
     }
+
+    pub async fn write<M: TleMsg>(&mut self, msg: M) -> Result<(), TleError> {
+        self.pin_led.set_high().unwrap();
+        self.pin_cs.set_low().unwrap();
+        let mut buf = msg.into().to_be_bytes();
+        self.spi.transfer_in_place(&mut buf).await?;
+        self.pin_cs.set_high().unwrap();
+        self.pin_led.set_low().unwrap();
+        Mono::delay(1u64.micros()).await;
+        Ok(())
+    }
+}
+
+impl From<spi::Error> for TleError {
+    fn from(_value: spi::Error) -> Self {
+        TleError::SpiErr
+    }
+}
+
+#[derive(Copy, Clone)]
+#[repr(u8)]
+pub enum TleError {
+    SpiErr,
+    Invalid,
+    Mismatch,
+    InvalidChannelConfig,
 }

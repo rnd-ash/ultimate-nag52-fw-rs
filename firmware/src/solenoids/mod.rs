@@ -5,7 +5,6 @@ use atsamd_hal::{
     time::Hertz,
 };
 use bsp::PowerEnSol;
-use defmt::println;
 
 use crate::{
     Mono,
@@ -13,7 +12,9 @@ use crate::{
         commands::{ShortToBatThreshold, TleChannel},
         solenoid_ctrl::{DitherSettings, Mode},
         tcc_sol::TccSol,
-        tle8242::{ChannelProps, R_SENSE_VAL, TLE8242_CLK_FREQ, Tle8242, TleConfiguration},
+        tle8242::{
+            ChannelProps, R_SENSE_VAL, TLE8242_CLK_FREQ, Tle8242, TleConfiguration, TleError,
+        },
     },
 };
 
@@ -56,7 +57,7 @@ pub enum ShiftValveState {
     #[default]
     Off,
     FullOn(u64),
-    HoldOn,
+    HoldOn(u16),
 }
 
 impl ShiftValveState {
@@ -91,7 +92,7 @@ impl MonitoredOutputs {
     }
 }
 
-pub struct SolenoidControler<T: dmac::ChId, R: dmac::ChId> {
+pub struct SolenoidController<T: dmac::ChId, R: dmac::ChId> {
     tle8242: Tle8242<T, R>,
     pin_sol_pwr_en: PowerEnSol,
     last_mpc: u16,
@@ -121,16 +122,24 @@ async fn set_binary_valve<I: ChId, O: ChId>(
 }
 
 macro_rules! make_binary_valve {
-    ($name:ident, $chan:expr, $field:ident) => {
-        pub async fn $name(&mut self, en: bool) {
+    ($set_name:ident, $get_name: ident, $chan:expr, $field:ident) => {
+        pub async fn $set_name(&mut self, en: bool) {
             let tle8242 = &mut self.tle8242;
             let ss_state = &mut self.$field;
             set_binary_valve(tle8242, en, $chan, ss_state).await;
         }
+
+        pub fn $get_name(&self) -> u16 {
+            match self.$field {
+                ShiftValveState::FullOn(_) => 4096,
+                ShiftValveState::Off => 0,
+                ShiftValveState::HoldOn(pwm) => pwm,
+            }
+        }
     };
 }
 
-impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
+impl<T: dmac::ChId, R: dmac::ChId> SolenoidController<T, R> {
     pub fn new(tle8242: Tle8242<T, R>, pin_sol_pwr_en: PowerEnSol) -> Self {
         Self {
             tle8242,
@@ -154,7 +163,7 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         }
     }
 
-    pub async fn init(&mut self) {
+    pub async fn init(&mut self) -> bool {
         self.pin_sol_pwr_en.set_high().unwrap();
 
         // Configuration for linear pressure solenoids
@@ -203,27 +212,32 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
             .with_props(TLE_CHAN_Y3, shift_props)
             .with_props(TLE_CHAN_Y4, shift_props)
             .with_props(TLE_CHAN_Y5, shift_props);
-        self.tle8242.init(cfg).await;
+        match self.tle8242.init(cfg).await {
+            Ok(_) => true,
+            Err(_) => false,
+        }
     }
 
-    pub async fn set_spc_current(&mut self, setpoint_ma: u16) {
+    pub async fn set_spc_current(&mut self, setpoint_ma: u16) -> Result<(), TleError> {
         if self.last_spc != setpoint_ma {
             let setpoint_val = setpoint_ma as f32 / (320.0 / R_SENSE_VAL) * 2048.0;
             self.tle8242
                 .set_channel_current(TLE_CHAN_SPC, setpoint_val as u16)
-                .await;
+                .await?;
             self.last_spc = setpoint_ma;
         }
+        Ok(())
     }
 
-    pub async fn set_mpc_current(&mut self, setpoint_ma: u16) {
+    pub async fn set_mpc_current(&mut self, setpoint_ma: u16) -> Result<(), TleError> {
         if self.last_mpc != setpoint_ma {
             let setpoint_val = setpoint_ma as f32 / (320.0 / R_SENSE_VAL) * 2048.0;
             self.tle8242
                 .set_channel_current(TLE_CHAN_MPC, setpoint_val as u16)
-                .await;
+                .await?;
             self.last_mpc = setpoint_ma;
         }
+        Ok(())
     }
 
     pub fn set_tcc_pwm(&mut self, duty: u16, sol_tcc: &mut TccSol) {
@@ -240,21 +254,23 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         let millis = Mono::now().duration_since_epoch().to_millis();
         // macro to easily update binary valve states
         macro_rules! update_binary_valve {
-            ($chan:ident, $field:ident, $max_on_time: literal) => {
+            ($chan:ident, $field:ident, $max_on_time: literal, $hold_pwm: literal) => {
                 if let ShiftValveState::FullOn(on_ts) = self.$field {
                     if millis - on_ts > $max_on_time {
                         // Reduce PWM
-                        self.tle8242.set_channel_pwm($chan, 0.25).await;
-                        self.$field = ShiftValveState::HoldOn;
+                        self.tle8242
+                            .set_channel_pwm($chan, $hold_pwm as f32 / 4096.0)
+                            .await;
+                        self.$field = ShiftValveState::HoldOn($hold_pwm);
                     }
                 }
             };
         }
 
         // Update the valves if the PWM should be lowered
-        update_binary_valve!(TLE_CHAN_Y3, y3_state, 250);
-        update_binary_valve!(TLE_CHAN_Y4, y4_state, 250);
-        update_binary_valve!(TLE_CHAN_Y5, y5_state, 250);
+        update_binary_valve!(TLE_CHAN_Y3, y3_state, 250, 1024);
+        update_binary_valve!(TLE_CHAN_Y4, y4_state, 250, 1024);
+        update_binary_valve!(TLE_CHAN_Y5, y5_state, 250, 1024);
 
         self.update_current_readings().await;
     }
@@ -274,7 +290,7 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
 
     pub async fn update_current_readings(&mut self) {
         let avg_maybe = if !self.is_channel_on(self.all_channels[self.last_read_current_channel]) {
-            Some(0)
+            Ok(Some(0))
         } else {
             self.tle8242
                 .get_avg_current(self.all_channels[self.last_read_current_channel])
@@ -282,7 +298,7 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         };
 
         // Try to read the current channel
-        if let Some(avg) = avg_maybe {
+        if let Ok(Some(avg)) = avg_maybe {
             // Valid response
             // Parse to mA
             let milliamps = match self.all_channels[self.last_read_current_channel] {
@@ -326,9 +342,13 @@ impl<T: dmac::ChId, R: dmac::ChId> SolenoidControler<T, R> {
         self.monitored_currents.y5_current
     }
 
+    pub fn en_high_side_power(&mut self, en: bool) {
+        self.pin_sol_pwr_en.set_state(en.into());
+    }
+
     // Binary valve manipulations from macro
 
-    make_binary_valve!(set_y3, TLE_CHAN_Y3, y3_state);
-    make_binary_valve!(set_y4, TLE_CHAN_Y4, y4_state);
-    make_binary_valve!(set_y5, TLE_CHAN_Y5, y5_state);
+    make_binary_valve!(set_y3, get_y3_pwm, TLE_CHAN_Y3, y3_state);
+    make_binary_valve!(set_y4, get_y4_pwm, TLE_CHAN_Y4, y4_state);
+    make_binary_valve!(set_y5, get_y5_pwm, TLE_CHAN_Y5, y5_state);
 }

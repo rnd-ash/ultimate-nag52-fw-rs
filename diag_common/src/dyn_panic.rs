@@ -87,6 +87,9 @@ pub struct AppPanicInfo {
     location: Option<LocationInfo>,
 }
 
+unsafe impl Sync for AppPanicInfo{}
+unsafe impl Send for AppPanicInfo{}
+
 impl AppPanicInfo {
     pub fn new(panic: &PanicInfo) -> Self {
         let msg = match panic.message().as_str() {

@@ -4,7 +4,7 @@
 //! for speed sensors within or outside the gearbox.
 //!
 //! Each speed sensor signal requires multiple peripherals to function together in order
-//! to count pulses without any CPU intervension. The mapping of signals to peripherals is
+//! to count pulses without any CPU intervention. The mapping of signals to peripherals is
 //! as follows:
 //!
 //! |*Signal*|*Description*|*Pulses/rev*|*GPIO Pin*|*EIC Channel*|*EVSYS Channel*|*TC peripheral*|
@@ -68,12 +68,25 @@ pub type Ext2RpmPc =
 pub type Ext3RpmPc =
     PulseCounter<Tc4PulseCounter, evsys::Ch4, EicEvGen<Pin<PD01, PullDownInterrupt>, eic::Ch1>>;
 
+#[derive(Copy, Clone)]
 pub struct AllPulseReadings {
-    pulses_n2: u16,
-    pulses_n3: u16,
-    pulses_ext1: Option<u16>,
-    pulses_ext2: Option<u16>,
-    pulses_ext3: Option<u16>,
+    pub pulses_n2: u32,
+    pub pulses_n3: u32,
+    pub pulses_ext1: u32,
+    pub pulses_ext2: u32,
+    pub pulses_ext3: u32,
+}
+
+impl AllPulseReadings {
+    pub const fn new() -> Self {
+        Self {
+            pulses_n2: 0,
+            pulses_n3: 0,
+            pulses_ext1: 0,
+            pulses_ext2: 0,
+            pulses_ext3: 0,
+        }
+    }
 }
 
 pub struct AllSpeedSensors {
@@ -114,20 +127,20 @@ impl AllSpeedSensors {
     }
 
     pub fn update(&self) -> AllPulseReadings {
-        let n2_res = self.n2.count_and_clear();
-        let n3_res = self.n3.count_and_clear();
+        let mut pulses = AllPulseReadings::new();
+        pulses.pulses_n2 = self.n2.count_and_reset() as u32;
+        pulses.pulses_n3 = self.n3.count_and_reset() as u32;
 
-        let ext1_res = self.ext1.as_ref().map(|x| x.count_and_clear());
-        let ext2_res = self.ext2.as_ref().map(|x| x.count_and_clear());
-        let ext3_res = self.ext3.as_ref().map(|x| x.count_and_clear());
-
-        AllPulseReadings {
-            pulses_n2: n2_res,
-            pulses_n3: n3_res,
-            pulses_ext1: ext1_res,
-            pulses_ext2: ext2_res,
-            pulses_ext3: ext3_res,
+        if let Some(ext1) = self.ext1.as_ref().map(|x| x.count_and_reset()) {
+            pulses.pulses_ext1 += ext1 as u32;
         }
+        if let Some(ext2) = self.ext2.as_ref().map(|x| x.count_and_reset()) {
+            pulses.pulses_ext2 = ext2 as u32;
+        }
+        if let Some(ext3) = self.ext3.as_ref().map(|x| x.count_and_reset()) {
+            pulses.pulses_ext3 = ext3 as u32;
+        }
+        pulses
     }
 }
 

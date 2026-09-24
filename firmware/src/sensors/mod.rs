@@ -4,24 +4,26 @@ use atsamd_hal::{
         self,
         v2::{apb::ApbClk, gclk::GclkId, pclk::Pclk},
     },
-    pac::{self, Supc, generic::Safe},
+    pac::{self, Supc},
 };
 
-use defmt::println;
 use egs_logic::TftReading;
-use egs_maths::maps::{Safei32, TupleMap};
+use egs_maths::maps::TupleMap;
 use futures::join;
 
-use crate::sensors::adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs};
+use crate::sensors::{
+    adc::{Adc0Pins, Adc1Pins, Adc1VariableInputs},
+};
 use crate::{Adc0Irqs, Adc1Irqs};
 
 use egs_maths;
+use egs_maths::tcu_num::Safei32;
 
 pub mod adc;
 pub mod speed_sensors;
 pub mod variable_adc_input;
 
-#[derive(Default, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct SensorData {
     /// TFT Sensor state
     pub tft: TftReading,
@@ -37,6 +39,26 @@ pub struct SensorData {
     pub t_pcb: i8,
     /// Temperature of PCB near TLE8242 IC (C)
     pub t_tle: i8,
+    // Core voltage mV
+    pub core_mv: u16,
+    // IO Voltage mV
+    pub io_mv: u16,
+}
+
+impl SensorData {
+    pub const fn new() -> Self {
+        Self {
+            tft: TftReading::ParkOrNeutral,
+            vkl15: 0,
+            vsense: 0,
+            vkl87: 0,
+            ikl87: 0,
+            t_pcb: 0,
+            t_tle: 0,
+            core_mv: 0,
+            io_mv: 0,
+        }
+    }
 }
 
 /// Assume ADC reading is 0-4095 (=0-3.3V)
@@ -104,6 +126,7 @@ impl AdcData {
             self.adc0_pins.poll_all(&mut self.adc0, &mut self.supc),
             self.adc1_pins.poll_all(&mut self.adc1)
         );
+        //println!("{:?}", adc1_res);
         let _var_res = self.adc1_variable_inputs.poll_all(&mut self.adc1).await;
 
         // Process the results
@@ -124,7 +147,7 @@ impl AdcData {
         let vkl15 = adc_reading_to_source(adc1_res.pmon_kl15, 12_000, 3_300);
         let vsense = adc_reading_to_source(adc1_res.pmon_sens, 10_000, 15_000);
         let vkl87 = adc_reading_to_source(adc1_res.pmon_kl87, 12_000, 3_300);
-        let ikl87 = if adc1_res.pmon_kl87_diag < 10 || vkl87 < 5000 {
+        let ikl87 = if adc1_res.pmon_kl87_diag < 10 {
             0
         } else {
             let reading_mv = (adc1_res.pmon_kl87_diag as f32 / 4095.0) * 3.3;
@@ -140,6 +163,8 @@ impl AdcData {
             ikl87,
             t_pcb: temp_pcb as i8,
             t_tle: temp_tle8242 as i8,
+            core_mv: adc0_res.core_mv,
+            io_mv: adc0_res.io_mv,
         }
     }
 }

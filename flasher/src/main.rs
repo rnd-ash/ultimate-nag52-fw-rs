@@ -15,7 +15,7 @@ use color_eyre::{
 };
 use console::style;
 use defmt_parser::Level;
-use diag_common::{BootloaderStayReason, smarteeprom::CodeSectionInfo};
+use diag_common::{BootloaderStayReason, MemoryRegion, smarteeprom::CodeSectionInfo};
 use ecu_diagnostics::{
     DiagError,
     channel::{IsoTPChannel, IsoTPSettings, PayloadChannel},
@@ -26,10 +26,7 @@ use ecu_diagnostics::{
     kwp2000::{Kwp2000Protocol, KwpCommand, KwpError, KwpSessionType},
 };
 use elf::abi::PT_LOAD;
-use heatshrink::encoder::HeatshrinkEncoder;
-use indicatif::{
-    HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle,
-};
+use indicatif::{HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 use object::{
     Endianness, Object, ObjectSection, SectionKind,
     elf::FileHeader32,
@@ -59,7 +56,9 @@ pub enum Interface {
 #[derive(Subcommand, Clone)]
 pub enum Command {
     /// Analyze firmware binary for SRAM/Flash usage
-    Analyze { file: PathBuf },
+    Analyze {
+        file: PathBuf,
+    },
     /// Read out ECU identification
     Ident,
     /// Burn production date into the ECU
@@ -79,7 +78,7 @@ pub enum Command {
         #[clap(short)]
         log: bool,
         #[clap(long)]
-        compress: bool
+        compress: bool,
     },
     /// Read / Dump memory from the TCU to a binary file
     Read {
@@ -89,6 +88,7 @@ pub enum Command {
         end_address: u32,
         output_file: PathBuf,
     },
+    EraseQspi,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -376,7 +376,7 @@ fn flash(
     server: &mut DynamicDiagSession,
     fast_mode: bool,
     is_bl: bool,
-    use_compression: bool
+    use_compression: bool,
 ) -> Result<(), Report> {
     const PRE_END_ADDR: u64 = 1024 * 8;
     const BL_END_ADDR: u64 = 1024 * 128;
@@ -455,6 +455,91 @@ fn flash(
         start_address
     ));
 
+    erase(server, start_address, num_pages, fast_mode)?;
+    // Flash erase completed
+    let spinner = next_spinner(&mp, Some(spinner), 3, 6);
+    spinner.set_message("Preparing download");
+    let mut download_req = vec![KwpCommand::RequestDownload.into()];
+    download_req.extend_from_slice(&(start_address as u32).to_le_bytes());
+    download_req.push(use_compression as u8); // Fmt
+    download_req.extend_from_slice(&(array.len() as u32).to_le_bytes());
+    server.send_byte_array_with_response(&download_req, None)?;
+    let mut counter: u8 = 0;
+    let mut block_max = [0; 4096];
+    let mut addr = 0;
+
+    let spinner = next_spinner(&mp, Some(spinner), 4, 6);
+    spinner.set_message(format!(
+        "Transfering data  ({})",
+        HumanBytes(array.len() as u64)
+    ));
+    let pb = mp
+        .add(ProgressBar::new(array.len() as u64).with_message("Flashing"))
+        .with_style(
+            ProgressStyle::with_template(
+                "{percent}% [{bar:40.cyan/blue}] {msg} {decimal_bytes_per_sec} ETA: {eta}",
+            )
+            .unwrap()
+            .progress_chars("##-"),
+        );
+    while addr < array.len() {
+        let block_max_size = if use_compression { 2048 } else { 1024 };
+
+        let max_copy = core::cmp::min(block_max_size, array.len() - addr);
+        block_max[0] = KwpCommand::TransferData.into();
+        block_max[1] = counter;
+        pb.set_position(addr as u64);
+        if use_compression {
+            let out =
+                heatshrink::encoder::encode(&array[addr..addr + max_copy], &mut block_max[2..])
+                    .unwrap();
+            let len = out.len();
+            pb.set_message(format!(
+                "Ratio {:3.1}%",
+                (out.len() as f32 / max_copy as f32) * 100.0
+            ));
+            server.send_byte_array_with_response(&block_max[..2 + len], None)?;
+        } else {
+            block_max[2..2 + max_copy].copy_from_slice(&array[addr..addr + max_copy]);
+            server.send_byte_array_with_response(&block_max[..max_copy + 2], None)?;
+        }
+        addr += max_copy;
+        counter = counter.wrapping_add(1);
+    }
+    pb.finish_with_message(format!("{}", style("✔").green()));
+    mp.remove(&pb);
+    let spinner = next_spinner(&mp, Some(spinner), 5, 6);
+    spinner.set_message("Verifying flashed data");
+    // Start flash check routine
+    let mut hasher = crc32fast::Hasher::new_with_initial(DSU_CRC32_SEED);
+    hasher.reset();
+    hasher.update(&array);
+    let targ_crc = hasher.finalize();
+    let mut buf = vec![0x31, 0xE1];
+    let start = start_address as u32;
+    buf.extend_from_slice(&targ_crc.to_le_bytes());
+    buf.extend_from_slice(&start.to_le_bytes());
+    buf.extend_from_slice(&(array.len() as u32).to_le_bytes());
+    let response = server.send_byte_array_with_response(&buf, None)?;
+    if response[2] == 0x00 {
+        return Err(Report::msg("Flash CRC compare failed"));
+    }
+
+    // Reset ECU
+    let spinner = next_spinner(&mp, Some(spinner), 6, 6);
+    spinner.set_message("Resetting ECU");
+    server.send_byte_array_with_response(&[KwpCommand::ECUReset.into(), 0x01], None)?;
+    std::thread::sleep(Duration::from_millis(500)); // Allow the MCU to reset
+    spinner.finish_with_message(format!("{} {}", spinner.message(), style("✔").green()));
+    Ok(())
+}
+
+fn erase(
+    server: &mut DynamicDiagSession,
+    start_address: u32,
+    num_pages: usize,
+    fast_mode: bool,
+) -> Result<(), Report> {
     let mut erase_cmd = [0; 8];
     erase_cmd[0] = 0x31;
     erase_cmd[1] = 0xE0;
@@ -508,82 +593,6 @@ fn flash(
             }
         }
     }
-    // Flash erase completed
-    let spinner = next_spinner(&mp, Some(spinner), 3, 6);
-    spinner.set_message("Preparing download");
-    let mut download_req = vec![KwpCommand::RequestDownload.into()];
-    download_req.extend_from_slice(&(start_address as u32).to_le_bytes());
-    download_req.push(use_compression as u8); // Fmt
-    download_req.extend_from_slice(&(array.len() as u32).to_le_bytes());
-    server.send_byte_array_with_response(&download_req, None)?;
-    let mut counter: u8 = 0;
-    let mut block_max = [0; 4096];
-    let mut addr = 0;
-
-    let spinner = next_spinner(&mp, Some(spinner), 4, 6);
-    spinner.set_message(format!(
-        "Transfering data  ({})",
-        HumanBytes(array.len() as u64)
-    ));
-    let pb = mp
-        .add(ProgressBar::new(array.len() as u64).with_message("Flashing"))
-        .with_style(
-            ProgressStyle::with_template(
-                "{percent}% [{bar:40.cyan/blue}] {msg} {decimal_bytes_per_sec} ETA: {eta}",
-            )
-            .unwrap()
-            .progress_chars("##-"),
-        );
-    while addr < array.len() {
-
-        let block_max_size = if use_compression {
-            2048
-        } else {
-            1024
-        };
-
-        let max_copy = core::cmp::min(block_max_size, array.len() - addr);
-        block_max[0] = KwpCommand::TransferData.into();
-        block_max[1] = counter;
-        pb.set_position(addr as u64);
-        if use_compression {
-            let out = heatshrink::encoder::encode(&array[addr..addr + max_copy], &mut block_max[2..]).unwrap();
-            let len = out.len();
-            pb.set_message(format!("Ratio {:3.1}%", (out.len() as f32/max_copy as f32)*100.0));
-            server.send_byte_array_with_response(&block_max[..2 + len], None)?;
-            
-        } else {
-            block_max[2..2 + max_copy].copy_from_slice(&array[addr..addr + max_copy]);
-            server.send_byte_array_with_response(&block_max[..max_copy + 2], None)?;
-        }
-        addr += max_copy;
-        counter = counter.wrapping_add(1);
-    }
-    pb.finish_with_message(format!("{}", style("✔").green()));
-    mp.remove(&pb);
-    let spinner = next_spinner(&mp, Some(spinner), 5, 6);
-    spinner.set_message("Verifying flashed data");
-    // Start flash check routine
-    let mut hasher = crc32fast::Hasher::new_with_initial(DSU_CRC32_SEED);
-    hasher.reset();
-    hasher.update(&array);
-    let targ_crc = hasher.finalize();
-    let mut buf = vec![0x31, 0xE1];
-    let start = start_address as u32;
-    buf.extend_from_slice(&targ_crc.to_le_bytes());
-    buf.extend_from_slice(&start.to_le_bytes());
-    buf.extend_from_slice(&(array.len() as u32).to_le_bytes());
-    let response = server.send_byte_array_with_response(&buf, None)?;
-    if response[2] == 0x00 {
-        return Err(Report::msg("Flash CRC compare failed"));
-    }
-
-    // Reset ECU
-    let spinner = next_spinner(&mp, Some(spinner), 6, 6);
-    spinner.set_message("Resetting ECU");
-    server.send_byte_array_with_response(&[KwpCommand::ECUReset.into(), 0x01], None)?;
-    std::thread::sleep(Duration::from_millis(500)); // Allow the MCU to reset
-    spinner.finish_with_message(format!("{} {}", spinner.message(), style("✔").green()));
     Ok(())
 }
 
@@ -920,9 +929,9 @@ fn attach_log(path: &PathBuf, ty: Interface, name: Option<String>) -> Result<(),
                     "".to_string()
                 };
 
-                println!("[{:-<10} {}] {}", level_txt, ts_txt, decoded.msg)
+                println!("[{:-<10} {}] {}", level_txt, ts_txt, decoded.msg);
             } else {
-                println!("Decode err: {frame:02X?}")
+                println!("Decode error: {frame:02X?}");
             }
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -949,28 +958,22 @@ fn main() -> Result<()> {
             bootloader,
             application,
             log,
-            compress
+            compress,
         } => {
             if let Some(loader) = bootloader {
-                println!(
-                    "{}",
-                    style("Flashing bootloader").bold().green()
-                );
+                println!("{}", style("Flashing bootloader").bold().green());
                 flash(&mp, loader, &mut server, fast_mode, true, *compress)?;
             }
             drop(mp);
             mp = MultiProgress::new();
             if let Some(application) = application {
-                println!(
-                    "{}",
-                    style("Flashing application").bold().green()
-                );
+                println!("{}", style("Flashing application").bold().green());
                 // Restart the server to drain buffers etc
                 let _ = server.release();
                 std::thread::sleep(Duration::from_millis(1000));
                 server = create_server(&mut fast_mode, &args, &mut mp).unwrap();
                 flash(&mp, application, &mut server, fast_mode, false, *compress)?;
-                if *log  {
+                if *log {
                     // Switch to log mode
                     let log_mode = match args.interface {
                         Interface::Usb => 2,
@@ -981,7 +984,6 @@ fn main() -> Result<()> {
                     drop(server);
                     attach_log(application, args.interface, args.can_iface)?;
                 }
-            
             }
             Ok(())
         }
@@ -1003,6 +1005,15 @@ fn main() -> Result<()> {
         Command::SetSecurity { enable } => set_security_lock(server, *enable),
         Command::Analyze { .. } => {
             unreachable!()
+        }
+        Command::EraseQspi => {
+            server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
+            erase(
+                &mut server,
+                MemoryRegion::QspiFlash.start_addr(),
+                (16 * 1024 * 1024) / 4096,
+                fast_mode,
+            )
         }
     };
     if res.is_err() {

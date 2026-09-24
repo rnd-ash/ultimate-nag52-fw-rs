@@ -5,7 +5,7 @@
 //! converter clutch. This is done using a second input for a Zener shutoff MOSFET, which when activated
 //! causes the torque converter solenoid to rapidly slam shut, rather than slowly close due to magnetic field decay.
 //!
-//! The solenoid is controled using a finite state machine, which can have the following modes of operation:
+//! The solenoid is controlled using a finite state machine, which can have the following modes of operation:
 //!
 //! ## Below PWM 14/255 (Off)
 //! In this state, the electrical PWM of the solenoid is off, and the Zener pin is off
@@ -28,8 +28,6 @@
 // TCC Zener - PB16 Tcc3[0]/TC6[0]
 // TCC FDBK  - PB17 EIC[1]/TC6[1]/TCC3[1]
 
-use core::u32;
-
 use atsamd_hal::{
     clock::Tcc2Tcc3Clock,
     eic::{self, Sense},
@@ -45,7 +43,6 @@ use bsp::{TccCutoff, TccFdbk, TccPwm};
 use defmt::println;
 
 use crate::hal_extension::{
-    self,
     eic_ext::{self, EicEvGen},
     evsys::{self, EvSysChannel, GenReady, Uninitialized},
 };
@@ -68,23 +65,23 @@ pub struct ZenerPinOffEv;
 
 pub struct ZenerSpikeEv;
 
-impl hal_extension::evsys::EvSysGenerator for Tcc2Mc1Ev {
+impl evsys::EvSysGenerator for Tcc2Mc1Ev {
     const GENERATOR_ID: u8 = 0x3D; // TCC MC[1]
 }
 
-impl hal_extension::evsys::EvSysGenerator for Tcc2OvfEv {
+impl evsys::EvSysGenerator for Tcc2OvfEv {
     const GENERATOR_ID: u8 = 0x39; // TCC2 OVF
 }
 
-impl hal_extension::evsys::EvSysUser for ZenerPinOnEv {
+impl evsys::EvSysUser for ZenerPinOnEv {
     const USER_ID: usize = 0x1; // Port event 0
 }
 
-impl hal_extension::evsys::EvSysUser for ZenerPinOffEv {
+impl evsys::EvSysUser for ZenerPinOffEv {
     const USER_ID: usize = 0x2; // Port event 1
 }
 
-impl hal_extension::evsys::EvSysUser for ZenerSpikeEv {
+impl evsys::EvSysUser for ZenerSpikeEv {
     const USER_ID: usize = 33; // TCC2 MC0
 }
 
@@ -141,7 +138,7 @@ impl TccTcc {
         evsys_channel_zener_off: EvSysChannel<ZoffChId, Uninitialized>,
     ) -> Self {
         // Must be done here before we wire up MCLK
-        let evsys_channel_fdbk = evsys_channel_zener_spike.register_user::<ZenerSpikeEv>();
+        let _evsys_channel_fdbk = evsys_channel_zener_spike.register_user::<ZenerSpikeEv>();
 
         mclk.apbcmask().modify(|_, w| w.tcc2_().set_bit());
         tcc.ctrla().write(|w| w.enable().clear_bit());
@@ -215,8 +212,8 @@ impl TccTcc {
         // Wire up evsys generators
         let evsys_channel_zener_on = evsys_channel_zener_on.register_generator::<Tcc2Mc1Ev>();
         let evsys_channel_zener_off = evsys_channel_zener_off.register_generator::<Tcc2OvfEv>();
-        let evsys_channel_zener_on = evsys_channel_zener_on.register_user::<ZenerPinOnEv>();
-        let evsys_channel_zener_off = evsys_channel_zener_off.register_user::<ZenerPinOffEv>();
+        let _evsys_channel_zener_on = evsys_channel_zener_on.register_user::<ZenerPinOnEv>();
+        let _evsys_channel_zener_off = evsys_channel_zener_off.register_user::<ZenerPinOffEv>();
 
         // Setup channels for event system
         let port = unsafe { Peripherals::steal().port };
