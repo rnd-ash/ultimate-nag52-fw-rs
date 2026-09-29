@@ -205,7 +205,9 @@ impl Qspi<OneShot> {
         self.qspi.ctrla().modify(|_, w| w.enable().clear_bit());
         self.qspi.ctrlb().write(|w| {
             w.mode().memory();
-            w.csmode().lastxfer()
+            w.csmode().noreload();
+            w.csmode().lastxfer();
+            w.datalen()._8bits()
         });
         self.qspi.ctrla().modify(|_, w| w.enable().set_bit());
     }
@@ -355,9 +357,11 @@ impl<MODE> Qspi<MODE> {
         });
 
         while self.qspi.intflag().read().instrend().bit_is_clear() {}
-        self.qspi.intflag().write(|w| w.instrend().set_bit());
+        self.qspi
+            .intflag()
+            .write(|w| w.instrend().clear_bit_by_one());
         while self.qspi.intflag().read().csrise().bit_is_clear() {}
-        self.qspi.intflag().write(|w| w.csrise().set_bit());
+        self.qspi.intflag().write(|w| w.csrise().clear_bit_by_one());
     }
 
     unsafe fn run_write_instruction(

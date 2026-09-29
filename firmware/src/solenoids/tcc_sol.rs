@@ -187,9 +187,9 @@ impl TccTcc {
 
         tcc.ctrlbclr().write(|w| {
             // Count up
-            w.dir().set_bit();
+            w.dir().clear_bit_by_one();
             // Reset on hitting period value (To 0)
-            w.oneshot().set_bit()
+            w.oneshot().clear_bit_by_one()
         });
         // Set timer divider for counting
         tcc.ctrla().modify(|_, w| {
@@ -386,7 +386,10 @@ impl TccSol {
     #[inline]
     pub fn on_tcc_ovf(&mut self) {
         // Clear Interrupt flag
-        self.tcctcc.inner.intflag().write(|w| w.ovf().set_bit());
+        self.tcctcc
+            .inner
+            .intflag()
+            .write(|w| w.ovf().clear_bit_by_one());
         // As its a fresh period, set the watchpoints
         if self.phase_2_count != u32::MAX {
             // Only MC1 (Inrush->Off)
@@ -404,7 +407,10 @@ impl TccSol {
     #[inline]
     pub fn on_tcc_mc1(&mut self) {
         // Clear Interrupt flag
-        self.tcctcc.inner.intflag().write(|w| w.mc1().set_bit());
+        self.tcctcc
+            .inner
+            .intflag()
+            .write(|w| w.mc1().clear_bit_by_one());
         // Always going to off from this phase (Zener pin will also via EVSYS)
         self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, 0);
     }
@@ -413,7 +419,10 @@ impl TccSol {
     #[inline]
     pub fn on_tcc_mc2(&mut self) {
         // Clear Interrupt flag
-        self.tcctcc.inner.intflag().write(|w| w.mc2().set_bit());
+        self.tcctcc
+            .inner
+            .intflag()
+            .write(|w| w.mc2().clear_bit_by_one());
         // Hold phase requested
         self.tcc_pwm.set_duty(TCC1_CHANNEL_PWM, self.phase_2_pwm);
     }

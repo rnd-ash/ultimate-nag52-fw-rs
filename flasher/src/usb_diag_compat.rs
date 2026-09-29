@@ -135,7 +135,7 @@ impl UsbDiagIface {
                         && usb_inf.manufacturer.is_some()
                     {
                         if let Ok(serial) = serialport::new(&p.port_name, 115200)
-                            .timeout(Duration::from_millis(500))
+                            .timeout(Duration::from_millis(2500))
                             .open()
                         {
                             ser = serial;
@@ -162,8 +162,8 @@ impl UsbDiagIface {
                 let res = f(cached_port);
                 match res {
                     Ok(success) => return Ok(success),
-                    Err(_) => {
-                        println!("Uncaching port");
+                    Err(e) => {
+                        println!("Uncaching port {e:?}");
                         self.cached_port = None;
                     }
                 }

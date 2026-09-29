@@ -14,7 +14,7 @@ use atsamd_hal::{
 };
 pub use automotive_diag::kwp2000::*;
 use cortex_m::peripheral::SCB;
-use diag_common::diag_core::{MemCfg, SecurityLevel, check_mem_addr};
+use defmt::println;
 use diag_common::{
     BootloaderStayReason, MemoryRegion,
     hal_extensions::dsu::Dsu,
@@ -22,8 +22,12 @@ use diag_common::{
     ram_info::BootloaderRamInfo,
     smarteeprom::{CodeSectionInfo, get_smarteeprom_info, mutate_smarteeprom_info},
 };
+use diag_common::{
+    QSPI_AHB,
+    diag_core::{MemCfg, SecurityLevel, check_mem_addr},
+};
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PendingOperation {
     None,
     Reset,
@@ -41,6 +45,7 @@ pub enum PendingOperation {
         blk_id: u8,
         current_addr: u32,
         use_compression: bool,
+        qspi: bool,
     },
 }
 
@@ -73,6 +78,7 @@ pub struct KwpServer {
     dsu: Dsu,
     qspi: QspiStorage,
     last_cmd_time: u64,
+    long_op: bool,
     sec_level: SecurityLevel,
     flash_config: MemCfg,
     old_bl_info: BootloaderRamInfo,
@@ -109,6 +115,7 @@ impl KwpServer {
             dsu,
             qspi,
             last_cmd_time: 0,
+            long_op: false,
             sec_level: DEFAULT_SEC_MODE,
             flash_config: MemCfg {
                 flash_size,
@@ -127,10 +134,14 @@ impl KwpServer {
                 self.flash_config.qspi_size = size;
             }
         }
-        if now_ms - self.last_cmd_time > P2_MAX_MS && self.mode != KwpSessionType::Normal {
+        if now_ms - self.last_cmd_time > P2_MAX_MS
+            && self.mode != KwpSessionType::Normal
+            && !self.long_op
+        {
             defmt::debug!("Tester timeout. Going back to default mode");
             self.mode = KwpSessionType::Normal;
             self.pending_operation = PendingOperation::None;
+            self.completed_operation = None;
             self.sec_level = DEFAULT_SEC_MODE;
         }
         match &mut self.pending_operation {
@@ -167,15 +178,16 @@ impl KwpServer {
                 const BLOCK_32_KB: u32 = 32 * 1024;
                 let addr = *start + (4096 * *current);
                 // We can speed this up by doing 32K erase if possible
-                let (res, inc) = if addr % BLOCK_32_KB == 0 && (*total_sectors - *current) >= 8 {
-                    (self.qspi.erase_32k_block(addr, &mut Mono).await, 8)
-                } else {
-                    (self.qspi.erase_4k_sector(addr, &mut Mono).await, 1)
-                };
+                let (res, inc) =
+                    if addr % BLOCK_32_KB == 0 && (total_sectors.saturating_sub(*current)) >= 8 {
+                        (self.qspi.erase_32k_block(addr, &mut Mono).await, 8)
+                    } else {
+                        (self.qspi.erase_4k_sector(addr, &mut Mono).await, 1)
+                    };
                 match res {
                     true => {
                         *current += inc;
-                        if *total_sectors == *current {
+                        if *current >= *total_sectors {
                             self.pending_operation = PendingOperation::None;
                             self.completed_operation = Some(CompletedOperation::QspiErase(true))
                         }
@@ -202,27 +214,23 @@ impl KwpServer {
         1 + data.len()
     }
 
-    pub fn process_cmd<'a>(&'a mut self, cmd: &[u8], now_ms: u64) -> &'a [u8] {
+    pub async fn process_cmd<'a>(&'a mut self, cmd: &[u8], now_ms: u64) -> &'a [u8] {
         self.last_cmd_time = now_ms;
-        let r = if let PendingOperation::FlashErase { .. } = self.pending_operation {
-            Err(KwpError::BusyRepeatRequest)
-        } else {
-            match KwpCommand::try_from(cmd[0]).ok() {
-                Some(KwpCommand::ECUReset) => self.ecu_reset(cmd),
-                Some(KwpCommand::StartDiagnosticSession) => self.start_diag_session(cmd),
-                Some(KwpCommand::ReadMemoryByAddress) => self.read_mem_by_address(cmd),
-                Some(KwpCommand::RequestDownload) => self.start_download(cmd),
-                Some(KwpCommand::TesterPresent) => self.tester_present(cmd),
-                Some(KwpCommand::RequestTransferExit) => self.transfer_exit(cmd),
-                Some(KwpCommand::StartRoutineByLocalIdentifier) => self.routine_start(cmd),
-                Some(KwpCommand::ReadECUIdentification) => self.ecu_ident(cmd),
-                Some(KwpCommand::ReadDataByLocalIdentifier) => self.read_data_local_ident(cmd),
-                Some(KwpCommand::RequestRoutineResultsByLocalIdentifier) => {
-                    self.routine_results(cmd)
-                }
-                Some(KwpCommand::TransferData) => self.transfer_data(cmd),
-                _ => Err(KwpError::ServiceNotSupported),
-            }
+        self.long_op = false;
+        defmt::debug!("Kwp req: {:02X}..", cmd[..core::cmp::min(cmd.len(), 5)]);
+        let r = match KwpCommand::try_from(cmd[0]).ok() {
+            Some(KwpCommand::ECUReset) => self.ecu_reset(cmd),
+            Some(KwpCommand::StartDiagnosticSession) => self.start_diag_session(cmd),
+            Some(KwpCommand::ReadMemoryByAddress) => self.read_mem_by_address(cmd),
+            Some(KwpCommand::RequestDownload) => self.start_download(cmd),
+            Some(KwpCommand::TesterPresent) => self.tester_present(cmd),
+            Some(KwpCommand::RequestTransferExit) => self.transfer_exit(cmd),
+            Some(KwpCommand::StartRoutineByLocalIdentifier) => self.routine_start(cmd),
+            Some(KwpCommand::ReadECUIdentification) => self.ecu_ident(cmd),
+            Some(KwpCommand::ReadDataByLocalIdentifier) => self.read_data_local_ident(cmd),
+            Some(KwpCommand::RequestRoutineResultsByLocalIdentifier) => self.routine_results(cmd),
+            Some(KwpCommand::TransferData) => self.transfer_data(cmd).await,
+            _ => Err(KwpError::ServiceNotSupported),
         };
         let reply_len = r.unwrap_or_else(|nrc| self.make_nrc(cmd[0], nrc));
         defmt::debug!(
@@ -466,6 +474,9 @@ impl KwpServer {
         if self.mode != KwpSessionType::Reprogramming {
             return Err(KwpError::ServiceNotSupportedInActiveSession);
         }
+        if self.pending_operation != PendingOperation::None {
+            return Err(KwpError::ConditionsNotCorrectRequestSequenceError);
+        }
         // We want 2 bytes for number of 8192 blocks (LE)
         // 4 bytes for start address (LE)
         if cmd.len() < 2 {
@@ -642,6 +653,8 @@ impl KwpServer {
                 }
                 _ => Err(KwpError::ConditionsNotCorrectRequestSequenceError),
             }
+        } else if self.pending_operation == PendingOperation::None {
+            Err(KwpError::ConditionsNotCorrectRequestSequenceError)
         } else {
             Err(KwpError::RoutineNotComplete)
         }
@@ -660,12 +673,19 @@ impl KwpServer {
             let mut addr = u32::from_le_bytes(cmd[1..5].try_into().unwrap());
             let fmt = cmd[5];
             let size = u32::from_le_bytes(cmd[6..10].try_into().unwrap());
-            let app_region = MemoryRegion::Application.range_exclusive();
+
+            let is_qspi = MemoryRegion::QspiFlash.range_exclusive().contains(&addr)
+                && MemoryRegion::QspiFlash
+                    .range_exclusive()
+                    .contains(&(addr + size));
+            let is_app = MemoryRegion::Application.range_exclusive().contains(&addr)
+                && MemoryRegion::Application
+                    .range_exclusive()
+                    .contains(&(addr + size));
 
             if addr == MemoryRegion::Bootloader.start_addr() {
                 addr = MemoryRegion::BootloaderScratch.start_addr();
-            } else if fmt > 1 || !app_region.contains(&addr) || !app_region.contains(&(addr + size))
-            {
+            } else if fmt > 1 || (!is_qspi && !is_app) {
                 return Err(KwpError::SubFunctionNotSupportedInvalidFormat);
             }
             // Valid params, lets start flashing
@@ -675,16 +695,18 @@ impl KwpServer {
                 blk_id: 0,
                 current_addr: addr,
                 use_compression: fmt != 0,
+                qspi: is_qspi,
             };
             Ok(self.make_positive_reply(cmd[0], &bs))
         }
     }
 
-    fn transfer_data(&mut self, cmd: &[u8]) -> ServerResult {
+    async fn transfer_data(&mut self, cmd: &[u8]) -> ServerResult {
         if let PendingOperation::Flashing {
             blk_id,
             current_addr,
             use_compression,
+            qspi,
         } = &mut self.pending_operation
         {
             if cmd.len() > 2 {
@@ -711,22 +733,38 @@ impl KwpServer {
                         // Copy to 4 byte aligned array
                         self.flash_buf[..cmd.len() - 2].copy_from_slice(&cmd[2..]);
                     }
-                    // Write to aligned
-                    unsafe {
-                        let source: &[u32] = core::slice::from_raw_parts(
-                            self.flash_buf.as_ptr() as *const u32,
-                            data_size / 4,
-                        );
-                        if self
-                            .nvm
-                            .write_flash_from_slice(addr, source, nvm::WriteGranularity::QuadWord)
-                            .is_err()
-                        {
-                            Err(KwpError::TransferSuspended)?;
-                        }
+                    if *qspi {
+                        self.long_op = true;
+                        let qspi_addr = *current_addr - QSPI_AHB;
+                        self.qspi
+                            .write(qspi_addr, &self.flash_buf[..data_size], &mut Mono)
+                            .await;
+
                         *current_addr += data_size as u32;
                         *blk_id += 1;
                         Ok(self.make_positive_reply(cmd[0], &[0x00]))
+                    } else {
+                        // Write to aligned
+                        unsafe {
+                            let source: &[u32] = core::slice::from_raw_parts(
+                                self.flash_buf.as_ptr() as *const u32,
+                                data_size / 4,
+                            );
+                            if self
+                                .nvm
+                                .write_flash_from_slice(
+                                    addr,
+                                    source,
+                                    nvm::WriteGranularity::QuadWord,
+                                )
+                                .is_err()
+                            {
+                                Err(KwpError::TransferSuspended)?;
+                            }
+                            *current_addr += data_size as u32;
+                            *blk_id += 1;
+                            Ok(self.make_positive_reply(cmd[0], &[0x00]))
+                        }
                     }
                 } else {
                     // Mismatch

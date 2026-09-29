@@ -1,14 +1,12 @@
-use core::ptr::copy_nonoverlapping;
-
 use crate::{
-    QSPI_AHB,
     hal_extensions::qspi_async::{
-        Command::{self, ReadStatus},
+        Command::{self},
         OneShot, Qspi,
     },
 };
 use atsamd_hal::prelude::_atsamd_hal_embedded_hal_digital_v2_OutputPin;
 use bsp::LedQspi;
+use rtic_sync::arbiter::Arbiter;
 
 pub struct QspiStorage {
     inner: Qspi<OneShot>,
@@ -53,6 +51,7 @@ impl QspiStorage {
         }
         self.inner.set_clk_divider(CLK_CYCLES_FAST);
         self.led.set_low().unwrap();
+        self.init_chip(tim).await;
     }
 
     pub async fn erase_4k_sector<T: embedded_hal_async::delay::DelayNs>(
@@ -62,6 +61,7 @@ impl QspiStorage {
     ) -> bool {
         self.led.set_high().unwrap();
         self.inner.set_clk_divider(CLK_CYCLES_SLOW);
+        defmt::debug!("QSPI 4K erase from 0x{:08X}", addr);
         let ret = if let Some(handle) = self.inner.erase_sector(addr) {
             loop {
                 tim.delay_ms(10).await;
@@ -85,6 +85,7 @@ impl QspiStorage {
     ) -> bool {
         self.led.set_high().unwrap();
         self.inner.set_clk_divider(CLK_CYCLES_SLOW);
+        defmt::debug!("QSPI 32K erase from 0x{:08X}", addr);
         let ret = if let Some(handle) = self.inner.erase_block(addr) {
             loop {
                 tim.delay_ms(10).await;
@@ -107,12 +108,21 @@ impl QspiStorage {
         data: &[u8],
         tim: &mut T,
     ) {
+        defmt::debug!("QSPI write {} bytes at 0x{:08X}", data.len(), addr);
         self.with_flash(|qspi| {
-            qspi.run_command(Command::WriteEnable).unwrap();
-            qspi.write_memory(addr, data);
+            // Enable QSPI for writing
+            qspi.write_command(Command::WriteStatus2, &[0x02]).unwrap();
         });
-        while !self.ready() {
-            tim.delay_ms(1).await;
+        let mut off = 0;
+        for block in data.chunks(256) {
+            self.with_flash(|qspi| {
+                qspi.run_command(Command::WriteEnable).unwrap();
+                qspi.write_memory(addr + off, block);
+            });
+            while !self.ready() {
+                tim.delay_ms(10).await;
+            }
+            off += block.len() as u32;
         }
     }
 
@@ -123,7 +133,10 @@ impl QspiStorage {
     }
 
     pub fn ready(&mut self) -> bool {
-        self.state(Command::ReadStatus) & 0x01 == 0 && self.state(Command::ReadStatus2) & 0x80 == 0
+        // S0 - Busy
+        self.state(Command::ReadStatus) & 0x01 == 0 &&
+        // S15 - Suspend status
+        self.state(Command::ReadStatus2) & 0x80 == 0
     }
 
     pub fn state(&mut self, s: Command) -> u8 {
@@ -161,5 +174,27 @@ impl QspiStorage {
             panic!("Fatal. Flash type is not supported (0x{:02X})", self.id[1]);
         }
         self.inner.set_clk_divider(CLK_CYCLES_FAST);
+        // Enable Quad SPI mode
+        self.inner
+            .write_command(Command::WriteStatus2, &[0x02])
+            .unwrap();
+        defmt::info!("QSPI init complete");
     }
+}
+
+pub trait FlashDriver {
+    async fn read();
+    async fn write();
+    async fn init();
+}
+
+pub struct Partition<'a, T: FlashDriver> {
+    offset: u32,
+    size: u32,
+    sto: &'a Arbiter<T>
+}
+
+
+pub struct AllPartitions {
+    
 }

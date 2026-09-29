@@ -117,11 +117,17 @@ fn can_app_start(bl_info: &diag_common::smarteeprom::SmartEepromInfo) -> bool {
 
 const ISOTP_BUF_SIZE: usize = 4096;
 
+// -- Timestamp for DEFMT -- //
+
+defmt::timestamp!("{=u64:us}", {
+    Mono::now().duration_since_epoch().to_micros()
+});
+
 atsamd_hal::rtc_monotonic!(Mono, rtc_clock::Clock32k);
 
 #[rtic::app(device = atsamd_hal::pac, dispatchers = [DAC_EMPTY_0])]
 mod app {
-    use atsamd_hal::{clock::v2::types::Can0, dsu::Dsu, gpio::PD12};
+    use atsamd_hal::{clock::v2::types::Can0, gpio::PD12};
     use automotive_diag::kwp2000::KwpSessionType;
     use bsp::can_deps::CAN_TX_MAILBOX_DIAG;
     use diag_common::{
@@ -497,7 +503,7 @@ mod app {
                     let response = diag_server.process_cmd(
                         buf.payload(),
                         Mono::now().duration_since_epoch().to_millis(),
-                    );
+                    ).await;
                     let _ = isotp_thread.write_payload(&mut Mono, response).await;
                 },
                 buf = usb_isotp_thread.read().fuse() => {
@@ -505,7 +511,7 @@ mod app {
                     let response = diag_server.process_cmd(
                         buf.payload(),
                         Mono::now().duration_since_epoch().to_millis(),
-                    );
+                    ).await;
                     let _ = usb_isotp_thread.write(response).await;
                 },
                 _ = Mono::delay(1.millis()).fuse() => {

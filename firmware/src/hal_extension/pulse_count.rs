@@ -155,7 +155,7 @@ impl<T: CounterInstance, EvId: super::evsys::ChId, EvSrc: EvSysGenerator>
             });
             instance.count().reset();
             if settings.stop_on_overflow {
-                instance.ctrlbclr().write(|w| w.oneshot().set_bit()); // Clear oneshot (Allow overflow)
+                instance.ctrlbclr().write(|w| w.oneshot().clear_bit_by_one()); // Clear oneshot (Allow overflow)
             } else {
                 instance.ctrlbset().write(|w| w.oneshot().set_bit()); // Set oneshot (Stop on overflow)
             }

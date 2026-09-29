@@ -14,8 +14,9 @@ use color_eyre::{
     owo_colors::OwoColorize,
 };
 use console::style;
+use defmt_decoder::{Location, Table};
 use defmt_parser::Level;
-use diag_common::{BootloaderStayReason, MemoryRegion, smarteeprom::CodeSectionInfo};
+use diag_common::{BootloaderStayReason, MemoryRegion, QSPI_AHB, smarteeprom::CodeSectionInfo};
 use ecu_diagnostics::{
     DiagError,
     channel::{IsoTPChannel, IsoTPSettings, PayloadChannel},
@@ -30,7 +31,7 @@ use indicatif::{HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressS
 use object::{
     Endianness, Object, ObjectSection, SectionKind,
     elf::FileHeader32,
-    read::elf::{FileHeader, ProgramHeader},
+    read::elf::{Dynamic, FileHeader, ProgramHeader},
 };
 
 use crate::{
@@ -59,6 +60,7 @@ pub enum Command {
     Analyze {
         file: PathBuf,
     },
+    Monitor,
     /// Read out ECU identification
     Ident,
     /// Burn production date into the ECU
@@ -312,7 +314,7 @@ fn analyze(file: &PathBuf, flash_max: u64) -> Result<(), Report> {
     let mut flash_bytes: usize = 0;
     let mut ram_bytes: usize = 0;
     let mut high_ram_watermark: u32 = 0;
-    let mut defmt_size: u64 = get_defmt_bytes(file).len() as u64;
+    let defmt_size: u64 = get_defmt_partition_bytes(file).len() as u64;
     for section in elf.sections() {
         if section.kind() == SectionKind::Other
             || section.kind() == SectionKind::Metadata
@@ -427,10 +429,6 @@ fn flash(
                 [seg.offset_in_elf as usize..seg.size as usize + seg.offset_in_elf as usize],
         );
     }
-    let mut num_pages = array.len() / 8192;
-    if array.len() % 8192 != 0 {
-        num_pages += 1;
-    }
     let spinner = next_spinner(&mp, None, 1, 6);
     spinner.set_message("Enter programming mode");
     // Now start the command chain
@@ -448,7 +446,50 @@ fn flash(
         server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
     }
     std::thread::sleep(Duration::from_millis(500)); // Allow the MCU to reset to bootloader
-    let spinner = next_spinner(&mp, Some(spinner), 2, 6);
+    flash_segment(
+        server,
+        mp,
+        &array,
+        start_address,
+        fast_mode,
+        use_compression,
+        true,
+    )?;
+    if !is_bl {
+        let defmt_bytes = get_defmt_partition_bytes(file);
+        flash_segment(
+            server,
+            mp,
+            &defmt_bytes,
+            QSPI_AHB,
+            fast_mode,
+            use_compression,
+            false,
+        )?;
+    }
+    // Reset ECU
+    let spinner = next_spinner(&mp, None, 6, 6);
+    spinner.set_message("Resetting ECU");
+    server.send_byte_array_with_response(&[KwpCommand::ECUReset.into(), 0x01], None)?;
+    std::thread::sleep(Duration::from_millis(500)); // Allow the MCU to reset
+    spinner.finish_with_message(format!("{} {}", spinner.message(), style("✔").green()));
+    Ok(())
+}
+
+fn flash_segment(
+    server: &mut DynamicDiagSession,
+    mp: &MultiProgress,
+    data: &[u8],
+    start_address: u32,
+    fast_mode: bool,
+    use_compression: bool,
+    do_crc: bool,
+) -> Result<(), Report> {
+    let mut num_pages = data.len() / 8192;
+    if data.len() % 8192 != 0 {
+        num_pages += 1;
+    }
+    let spinner = next_spinner(&mp, None, 2, 6);
     spinner.set_message(format!(
         "Erasing flash ({} from 0x{:08X})",
         HumanBytes((num_pages * 8192) as u64),
@@ -462,7 +503,7 @@ fn flash(
     let mut download_req = vec![KwpCommand::RequestDownload.into()];
     download_req.extend_from_slice(&(start_address as u32).to_le_bytes());
     download_req.push(use_compression as u8); // Fmt
-    download_req.extend_from_slice(&(array.len() as u32).to_le_bytes());
+    download_req.extend_from_slice(&(data.len() as u32).to_le_bytes());
     server.send_byte_array_with_response(&download_req, None)?;
     let mut counter: u8 = 0;
     let mut block_max = [0; 4096];
@@ -470,11 +511,11 @@ fn flash(
 
     let spinner = next_spinner(&mp, Some(spinner), 4, 6);
     spinner.set_message(format!(
-        "Transfering data  ({})",
-        HumanBytes(array.len() as u64)
+        "Transferring data  ({})",
+        HumanBytes(data.len() as u64)
     ));
     let pb = mp
-        .add(ProgressBar::new(array.len() as u64).with_message("Flashing"))
+        .add(ProgressBar::new(data.len() as u64).with_message("Flashing"))
         .with_style(
             ProgressStyle::with_template(
                 "{percent}% [{bar:40.cyan/blue}] {msg} {decimal_bytes_per_sec} ETA: {eta}",
@@ -482,16 +523,16 @@ fn flash(
             .unwrap()
             .progress_chars("##-"),
         );
-    while addr < array.len() {
+    while addr < data.len() {
         let block_max_size = if use_compression { 2048 } else { 1024 };
 
-        let max_copy = core::cmp::min(block_max_size, array.len() - addr);
+        let max_copy = core::cmp::min(block_max_size, data.len() - addr);
         block_max[0] = KwpCommand::TransferData.into();
         block_max[1] = counter;
         pb.set_position(addr as u64);
         if use_compression {
             let out =
-                heatshrink::encoder::encode(&array[addr..addr + max_copy], &mut block_max[2..])
+                heatshrink::encoder::encode(&data[addr..addr + max_copy], &mut block_max[2..])
                     .unwrap();
             let len = out.len();
             pb.set_message(format!(
@@ -500,38 +541,38 @@ fn flash(
             ));
             server.send_byte_array_with_response(&block_max[..2 + len], None)?;
         } else {
-            block_max[2..2 + max_copy].copy_from_slice(&array[addr..addr + max_copy]);
+            block_max[2..2 + max_copy].copy_from_slice(&data[addr..addr + max_copy]);
             server.send_byte_array_with_response(&block_max[..max_copy + 2], None)?;
         }
         addr += max_copy;
         counter = counter.wrapping_add(1);
     }
+    // Transfer exit
+    server.send_byte_array_with_response(&[0x37], None)?;
     pb.finish_with_message(format!("{}", style("✔").green()));
     mp.remove(&pb);
     let spinner = next_spinner(&mp, Some(spinner), 5, 6);
-    spinner.set_message("Verifying flashed data");
-    // Start flash check routine
-    let mut hasher = crc32fast::Hasher::new_with_initial(DSU_CRC32_SEED);
-    hasher.reset();
-    hasher.update(&array);
-    let targ_crc = hasher.finalize();
-    let mut buf = vec![0x31, 0xE1];
-    let start = start_address as u32;
-    buf.extend_from_slice(&targ_crc.to_le_bytes());
-    buf.extend_from_slice(&start.to_le_bytes());
-    buf.extend_from_slice(&(array.len() as u32).to_le_bytes());
-    let response = server.send_byte_array_with_response(&buf, None)?;
-    if response[2] == 0x00 {
-        return Err(Report::msg("Flash CRC compare failed"));
+    if do_crc {
+        spinner.set_message("Verifying flashed data");
+        // Start flash check routine
+        let mut hasher = crc32fast::Hasher::new_with_initial(DSU_CRC32_SEED);
+        hasher.reset();
+        hasher.update(&data);
+        let targ_crc = hasher.finalize();
+        let mut buf = vec![0x31, 0xE1];
+        let start = start_address as u32;
+        buf.extend_from_slice(&targ_crc.to_le_bytes());
+        buf.extend_from_slice(&start.to_le_bytes());
+        buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        let response = server.send_byte_array_with_response(&buf, None)?;
+        if response[2] == 0x00 {
+            Err(Report::msg("Flash CRC compare failed"))
+        } else {
+            Ok(())
+        }
+    } else {
+        Ok(())
     }
-
-    // Reset ECU
-    let spinner = next_spinner(&mp, Some(spinner), 6, 6);
-    spinner.set_message("Resetting ECU");
-    server.send_byte_array_with_response(&[KwpCommand::ECUReset.into(), 0x01], None)?;
-    std::thread::sleep(Duration::from_millis(500)); // Allow the MCU to reset
-    spinner.finish_with_message(format!("{} {}", spinner.message(), style("✔").green()));
-    Ok(())
 }
 
 fn erase(
@@ -572,21 +613,6 @@ fn erase(
             }
             Err(e) => {
                 e_counter += 1;
-                // Can happen after reboot
-                if fast_mode {
-                    server.send_byte_array_with_response(
-                        &[
-                            KwpCommand::StartDiagnosticSession.into(),
-                            KwpSessionType::Reprogramming.into(),
-                            0,
-                            0,
-                        ],
-                        None,
-                    )?;
-                } else {
-                    server.kwp_set_session(KwpSessionType::Reprogramming.into())?;
-                }
-                server.send_byte_array_with_response(&erase_cmd, None)?;
                 if e_counter == 2 {
                     return Err(e.into());
                 }
@@ -885,24 +911,96 @@ fn set_security_lock(server: DynamicDiagSession, en: bool) -> Result<(), Report>
     Ok(())
 }
 
-fn get_defmt_bytes(path: &PathBuf) -> Vec<u8> {
+fn get_defmt_partition_bytes(path: &PathBuf) -> Vec<u8> {
     let elf_bytes = fs::read(path).unwrap();
     let tab = defmt_decoder::Table::parse(&elf_bytes).ok().flatten();
     if let Some(table) = tab {
+        let mut compressed_loc = vec![];
+        if let Some(locations) = table.get_locations(&elf_bytes).ok() {
+            let tmp = postcard::to_allocvec(&locations).unwrap();
+            compressed_loc = lz4_flex::compress_prepend_size(&tmp);
+        }
         let res = postcard::to_allocvec(&table).unwrap();
-        lz4_flex::compress(&res)
+        let compressed_tab = lz4_flex::compress_prepend_size(&res);
+        // Magic, Len, CRC, Data
+        let header = 0xBAADBABEu32;
+        let len_tab = (compressed_tab.len() as u32).to_le_bytes();
+        let len_loc = (compressed_loc.len() as u32).to_le_bytes();
+
+        let crc_tab = crc32fast::hash(&compressed_tab).to_le_bytes();
+        let crc_loc = crc32fast::hash(&compressed_loc).to_le_bytes();
+
+        let mut v = vec![];
+        v.extend_from_slice(&header.to_be_bytes());
+        v.extend_from_slice(&len_tab);
+        v.extend_from_slice(&len_loc);
+        v.extend_from_slice(&crc_tab);
+        v.extend_from_slice(&crc_loc);
+        v.extend_from_slice(&compressed_tab);
+        v.extend_from_slice(&compressed_loc);
+        // Align to u32
+        while !v.len().is_multiple_of(4) {
+            v.push(0xAA);
+        }
+        v
     } else {
         vec![]
     }
 }
 
-fn attach_log(path: &PathBuf, ty: Interface, name: Option<String>) -> Result<(), Report> {
-    let elf_bytes = fs::read(path).unwrap();
-    let table = defmt_decoder::Table::parse(&elf_bytes)
-        .map_err(|e| Report::msg(e.to_string()))?
-        .ok_or_else(|| Report::msg(".defmt table not found"))?;
-    let locations = table.get_locations(&elf_bytes).ok();
+fn download_defmt_bytes(
+    server: &mut DynamicDiagSession,
+) -> Result<(Table, Option<BTreeMap<u64, Location>>), Report> {
+    fn read_mem(
+        server: &mut DynamicDiagSession,
+        addr: u32,
+        total_bytes: u32,
+    ) -> Result<Vec<u8>, Report> {
+        let mut v = Vec::new();
+        while (v.len() as u32) < total_bytes {
+            let max = std::cmp::min(250, total_bytes - v.len() as u32);
+            let mut req = vec![0x23, max as u8];
+            req.extend_from_slice(&(addr + v.len() as u32).to_le_bytes());
+            let resp = server.send_byte_array_with_response(&req, None)?;
+            v.extend_from_slice(&resp[1..]);
+        }
+        Ok(v)
+    }
 
+    server.kwp_set_session(KwpSessionType::ExtendedDiagnostics.into())?;
+    let header_bytes = read_mem(server, QSPI_AHB, 24)?;
+    let magic = u32::from_be_bytes(header_bytes[0..4].try_into().unwrap());
+
+    let len_tab = u32::from_le_bytes(header_bytes[4..8].try_into().unwrap());
+    let len_loc = u32::from_le_bytes(header_bytes[8..12].try_into().unwrap());
+
+    let crc_tab = u32::from_le_bytes(header_bytes[12..16].try_into().unwrap());
+    let crc_loc = u32::from_le_bytes(header_bytes[16..20].try_into().unwrap());
+
+    const MB: u32 = 1024 * 1024;
+    println!(
+        "{:08X} {} {} {:08X} {:08X}",
+        magic, len_tab, len_loc, crc_loc, crc_tab
+    );
+    if magic != 0xBAADBABE || len_tab.saturating_add(len_loc) > MB {
+        return Err(Report::msg("No valid DEFMT partition found"));
+    }
+    let to_download = len_tab + len_loc;
+    let part = read_mem(server, QSPI_AHB + 20, to_download)?;
+
+    let tab_bytes = lz4_flex::decompress_size_prepended(&part[..len_tab as usize])?;
+    let loc_bytes = lz4_flex::decompress_size_prepended(&part[len_tab as usize..])?;
+    let tab: Table = postcard::from_bytes(&tab_bytes)?;
+    let loc: Option<BTreeMap<u64, Location>> = postcard::from_bytes(&loc_bytes).ok();
+    Ok((tab, loc))
+}
+
+fn attach_log_table(
+    table: Table,
+    locs: Option<BTreeMap<u64, Location>>,
+    ty: Interface,
+    name: Option<String>,
+) -> Result<(), Report> {
     let server: Box<dyn DefmtLogEndpoint> = match ty {
         Interface::Usb => Box::new(UsbDiagIface::new().unwrap()),
         Interface::Can | Interface::CanFast => {
@@ -913,7 +1011,7 @@ fn attach_log(path: &PathBuf, ty: Interface, name: Option<String>) -> Result<(),
     };
     loop {
         while let Some(frame) = server.read_msg() {
-            if let Some(decoded) = defmt::decode_msg(&frame, &table, &locations) {
+            if let Some(decoded) = defmt::decode_msg(&frame, &table, &locs) {
                 let level_txt = match decoded.level {
                     Some(Level::Info) => format!("{}", "INFO".green().bold()),
                     Some(Level::Warn) => format!("{}", "WARN".yellow().bold()),
@@ -938,6 +1036,15 @@ fn attach_log(path: &PathBuf, ty: Interface, name: Option<String>) -> Result<(),
     }
 }
 
+fn attach_log(path: &PathBuf, ty: Interface, name: Option<String>) -> Result<(), Report> {
+    let elf_bytes = fs::read(path).unwrap();
+    let table = defmt_decoder::Table::parse(&elf_bytes)
+        .map_err(|e| Report::msg(e.to_string()))?
+        .ok_or_else(|| Report::msg(".defmt table not found"))?;
+    let locs = table.get_locations(&elf_bytes).ok();
+    attach_log_table(table, locs, ty, name)
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     color_eyre::install()?;
@@ -946,7 +1053,6 @@ fn main() -> Result<()> {
 
     if let Command::Analyze { file } = args.command.clone() {
         analyze(&file, 1024 * 1024)?;
-        attach_log(&file, args.interface, args.can_iface)?;
         return Ok(());
     }
 
@@ -1014,6 +1120,12 @@ fn main() -> Result<()> {
                 (16 * 1024 * 1024) / 4096,
                 fast_mode,
             )
+        }
+        Command::Monitor => {
+            let mut server = create_server(&mut fast_mode, &args, &mut mp)?;
+            let (tab, loc) = download_defmt_bytes(&mut server)?;
+            drop(server);
+            attach_log_table(tab, loc, args.interface, args.can_iface)
         }
     };
     if res.is_err() {
