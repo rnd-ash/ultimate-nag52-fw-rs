@@ -55,7 +55,10 @@ impl<
     }
 
     pub fn calculate_solenoid_status(&mut self) {
-        if !self.engine_running {
+        if self.dev_mode().has_error() {
+            self.mpc_pressure = 0;
+            self.spc_pressure = 0;
+        } else if !self.engine_running {
             self.mpc_pressure = 750;
             self.spc_pressure = 0;
         } else {
@@ -94,11 +97,21 @@ impl<
         // Memory saving for old variables (Shadowed for delta tracking)
         // -> TODO
         // Finally, output the shift valves intended current
-        self.outputs.spc_current = self.calculate_solenoid_current(self.spc_pressure as u32) as u16;
-        self.outputs.mpc_current = self.calculate_solenoid_current(self.mpc_pressure as u32) as u16;
-        self.outputs.y3_en = self.shift_valve_flags.contains(ShiftValveFlags::SS_1245);
-        self.outputs.y4_en = self.shift_valve_flags.contains(ShiftValveFlags::SS_34);
-        self.outputs.y5_en = self.shift_valve_flags.contains(ShiftValveFlags::SS_23);
+        if self.dev_mode().has_error() {
+            self.outputs.spc_current = 0;
+            self.outputs.mpc_current = 0;
+            self.outputs.y3_en = false;
+            self.outputs.y4_en = false;
+            self.outputs.y5_en = false;
+        } else {
+            self.outputs.spc_current =
+                self.calculate_solenoid_current(self.spc_pressure as u32) as u16;
+            self.outputs.mpc_current =
+                self.calculate_solenoid_current(self.mpc_pressure as u32) as u16;
+            self.outputs.y3_en = self.shift_valve_flags.contains(ShiftValveFlags::SS_1245);
+            self.outputs.y4_en = self.shift_valve_flags.contains(ShiftValveFlags::SS_34);
+            self.outputs.y5_en = self.shift_valve_flags.contains(ShiftValveFlags::SS_23);
+        }
     }
 }
 

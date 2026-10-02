@@ -92,7 +92,7 @@ const PRELOADER_ADDR_RANGE: Range<u32> = 0..(8 * KB);
 const BOOTLOADER_ADDR_RANGE: Range<u32> = (8 * KB)..(120 * KB);
 const BOOTLOADER_SCRATCH_ADDR_RANGE: Range<u32> = (120 * KB)..(240 * KB);
 const APP_ADDR_RANGE: Range<u32> = (120 * KB)..(1024 * KB);
-const QPSI_ADDR_RANGE: Range<u32> = (QSPI_AHB..(QSPI_AHB + 16 * 1024 * KB));
+const QPSI_ADDR_RANGE: Range<u32> = QSPI_AHB..(QSPI_AHB + 16 * 1024 * KB);
 
 pub enum MemoryRegion {
     Preloader,

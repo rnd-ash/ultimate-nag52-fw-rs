@@ -18,7 +18,7 @@ impl<
     AS: GearboxAdaptStorage,
 > Gearbox<'a, DS, CS, MS, AS>
 {
-    pub fn calculate_solenoid_current(&self, p_targ: u32) -> u32 {
+    pub fn calculate_solenoid_current(&self, p_target: u32) -> u32 {
         let factor: u32;
         let extra_p: u32;
         let hydr_cal = self.cal_storage.hydr_cal();
@@ -49,6 +49,7 @@ impl<
         // Now calculate
         let line_p =
             (hydr_cal.lp_reg_spring_pressure as u32 + self.vars.mpc_pressure as u32) * 1000;
+
         let working_p = (extra_p + (line_p / factor)) as u16;
         let inlet_p = interp_linear(
             working_p,
@@ -58,17 +59,17 @@ impl<
             hydr_cal.inlet_pressure_output_max,
         ) as u32;
 
-        let output_p = if p_targ < inlet_p {
+        let output_p = if p_target < inlet_p {
             // Target pressure falls within the max theoretical inlet pressure,
             // Compensate the output pressure based on inlet
-            let p_inc_inlet = p_targ as f32 + hydr_cal.inlet_pressure_offset as f32;
+            let p_inc_inlet = p_target as f32 + hydr_cal.inlet_pressure_offset as f32;
             let mut inlet_percent_adder = (hydr_cal.inlet_pressure_offset as u32
                 + (hydr_cal.inlet_pressure_output_max as u32 - inlet_p))
                 as f32
                 / 1000.0;
             inlet_percent_adder *= p_inc_inlet;
             inlet_percent_adder /= 1000.0;
-            (p_targ as u16 + inlet_percent_adder as u16).min(hydr_cal.max_pcs_pressure())
+            (p_target as u16 + inlet_percent_adder as u16).min(hydr_cal.max_pcs_pressure())
         } else {
             // Target pressure exceeds the solenoid inlet pressure,
             // no choice but to just force the max solenoid pressure

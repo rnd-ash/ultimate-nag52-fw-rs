@@ -1,8 +1,6 @@
-use crate::{
-    hal_extensions::qspi_async::{
-        Command::{self},
-        OneShot, Qspi,
-    },
+use crate::hal_extensions::qspi_async::{
+    Command::{self},
+    OneShot, Qspi,
 };
 use atsamd_hal::prelude::_atsamd_hal_embedded_hal_digital_v2_OutputPin;
 use bsp::LedQspi;
@@ -127,6 +125,9 @@ impl QspiStorage {
     }
 
     pub fn read(&mut self, addr: u32, data: &mut [u8]) {
+        if data.is_empty() {
+            return;
+        }
         self.with_flash(|qspi| {
             qspi.read_memory(addr, data);
         })
@@ -180,21 +181,4 @@ impl QspiStorage {
             .unwrap();
         defmt::info!("QSPI init complete");
     }
-}
-
-pub trait FlashDriver {
-    async fn read();
-    async fn write();
-    async fn init();
-}
-
-pub struct Partition<'a, T: FlashDriver> {
-    offset: u32,
-    size: u32,
-    sto: &'a Arbiter<T>
-}
-
-
-pub struct AllPartitions {
-    
 }

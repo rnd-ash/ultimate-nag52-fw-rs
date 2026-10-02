@@ -209,7 +209,7 @@ impl<
                 self.stat_times.shift_actuation_logic = wall_timer.half_micros() as u16;
 
                 // Safety monitoring
-                //self.safety_fn();
+                self.safety_fn();
                 self.stat_times.safety = wall_timer.half_micros() as u16;
 
                 // outputs
@@ -230,7 +230,6 @@ impl<
 
     fn safety_fn(&mut self) {
         if self.mode.has_error() {
-            println!("Im error");
             self.outputs.y3_en = false;
             self.outputs.y4_en = false;
             self.outputs.y5_en = false;

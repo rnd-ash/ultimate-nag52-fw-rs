@@ -1,13 +1,18 @@
-use crate::tasks::elapsed_dwt_ticks;
+use crate::{
+    storage::{QspiStorageCmd, QspiStorageResp},
+    tasks::elapsed_dwt_ticks,
+};
 
 use atsamd_hal::pac::DWT;
+use defmt::println;
 use egs_logic::{
-    calbrations::{hydr::HydrCal, mech::MechCal},
+    calbrations::{hydr::HydrCal, mech::MechCal, shift::ShiftMapCal, tcc_pump::TccPumpCal},
     storage::{
         GearboxAdaptStorage, GearboxCalibStorage, GearboxDtcStorage, GearboxMapStorage,
         StorageBacking, StoragePoll,
     },
 };
+use rtic_sync::channel::{Receiver, Sender};
 
 #[derive(Default)]
 pub struct EgsDtcStorage;
@@ -32,75 +37,99 @@ impl StorageBacking for EgsAdpStorage {
 impl GearboxAdaptStorage for EgsAdpStorage {}
 
 #[derive(Default)]
-pub struct EgsCalStorage;
+pub struct EgsCalStorage {
+    hydr_cal: (HydrCal, bool),
+    mech_cal: (MechCal, bool),
+    tcc_pump_cal: (TccPumpCal, bool),
+    shift_map_cal: (ShiftMapCal, bool),
+    channel: Option<(
+        Sender<'static, QspiStorageCmd, 2>,
+        Receiver<'static, QspiStorageResp, 2>,
+    )>,
+    state: u8,
+}
 
-impl StorageBacking for EgsCalStorage {
-    fn init_poll(&mut self) -> StoragePoll {
-        StoragePoll::Ready
+impl EgsCalStorage {
+    pub fn set_channels(
+        &mut self,
+        tx: Sender<'static, QspiStorageCmd, 2>,
+        rx: Receiver<'static, QspiStorageResp, 2>,
+    ) {
+        self.channel = Some((tx, rx))
     }
 }
 
-const HYDR_CAL: HydrCal = HydrCal {
-    p_multi_1: 513,
-    p_multi_other: 638,
-    lp_reg_spring_pressure: 1926,
-    overlap_circuit_factor_spc: [878, 1059, 1109, 1407, 1407, 534, 803, 878],
-    overlap_circuit_factor_mpc: [1407, 534, 803, 878, 878, 1059, 1109, 1407],
-    overlap_circuit_spring_pressure: [-826, -168, -432, -826, -826, -168, -432, -826],
-    shift_reg_spring_pressure: 601,
-    shift_spc_gain: [1993, 1000, 1000, 1000, 1993, 1000, 1000, 1000],
-    min_mpc_pressure: 1500,
-    filter_factor: 15,
-    mpc_flush_temp_threshold: 75,
-    mpc_no_flush_time: 30_000,
-    mpc_flush_time: 50,
-    extra_p_not_shifting: 0,
-    shift_pressure_addr_percent: 20,
-    inlet_pressure_offset: 1000,
-    inlet_pressure_input_min: 4000,
-    inlet_pressure_input_max: 10_000,
-    inlet_pressure_output_min: 4000,
-    inlet_pressure_output_max: 10_000,
-    extra_pressure_pump_speed_min: 1000,
-    extra_pressure_pump_speed_max: 4000,
-    extra_pressure_adder_r1_1: 1500,
-    extra_pressure_adder_other_gears: 1000,
-    shift_pressure_factor_percent: 37,
-    pcs_map_x: [100, 1300, 1800, 3250, 7100, 8200, 9700],
-    pcs_map_y: [25, 75, 110, 200],
-    pcs_map_z: [
-        1155, 945, 880, 710, 410, 320, 150, 1055, 860, 810, 685, 395, 300, 0, 990, 805, 765, 660,
-        385, 275, 0, 965, 770, 730, 620, 345, 235, 0,
-    ],
-};
-
-const MECH_CAL: MechCal = MechCal {
-    gb_ty: 0,
-    ratio_table: [0, 3595, 2186, 1405, 1000, 831, 3167, 1926],
-    inertia_factor: [1645, 1556, 1405, 1203, 1644, 1556, 1405, 1203],
-    friction_map: [
-        4709, 0, 0, 3574, 0, 0, 0, 0, 3076, 2303, 2685, 0, 1845, 0, 1871, 0, 1633, 0, 0, 1101, 0,
-        0, 1109, 0, 958, 1673, 971, 0, 0, 0, 0, 1390, 807, 604, 0, 0, 0, 0, 3076, 2303, 0, 3387,
-        1845, 0, 1871, 0, 0, 2060,
-    ],
-    max_torque_on_clutch: [1000, 1000, 640, 820],
-    max_torque_off_clutch: [1000, 1000, 1440, 750],
-    release_spring_pressure: [1270, 846, 1205, 1139, 1289, 488],
-    inertia_torque: [16, 18, 25, 125, 16, 18, 25, 125],
-    strongest_loaded_clutch_idx: [255, 2, 2, 1, 1, 1, 2, 2],
-    turbine_drag: [16, 10, 35, 59, 16, 18, 25, 30],
-    atf_density_minus_50c: 889,
-    atf_density_drop_per_c: 60,
-    atf_density_centrifugal_force_factor: [0, 40_000, 3_000],
-};
+impl StorageBacking for EgsCalStorage {
+    fn init_poll(&mut self) -> StoragePoll {
+        if let Some((tx, rx)) = self.channel.as_mut() {
+            // FSM to request calibration loading
+            if self.state == 0 && tx.try_send(QspiStorageCmd::ReadMechCal).is_ok() {
+                self.state = 1;
+            } else if self.state == 1 && tx.try_send(QspiStorageCmd::ReadHydrCal).is_ok() {
+                self.state = 2;
+            } else if self.state == 2 && tx.try_send(QspiStorageCmd::ReadTccPumpCal).is_ok() {
+                self.state = 3;
+            } else if self.state == 3 && tx.try_send(QspiStorageCmd::ReadShiftMapCal).is_ok() {
+                self.state = 4;
+            }
+            if let Ok(resp) = rx.try_recv() {
+                // Query response
+                match resp {
+                    QspiStorageResp::MechCal(cal) => {
+                        defmt::debug!("MECH CAL resp received");
+                        self.mech_cal.0 = cal.unwrap_or_default();
+                        self.mech_cal.1 = true;
+                    }
+                    QspiStorageResp::HydrCal(cal) => {
+                        defmt::debug!("HYDR CAL resp received");
+                        self.hydr_cal.0 = cal.unwrap_or_default();
+                        self.hydr_cal.1 = true;
+                    }
+                    QspiStorageResp::ShiftMapCal(cal) => {
+                        defmt::debug!("Shift map CAL resp received");
+                        self.shift_map_cal.0 = cal.unwrap_or_default();
+                        self.shift_map_cal.1 = true;
+                    }
+                    QspiStorageResp::TccPumpCal(cal) => {
+                        defmt::debug!("TCC Pump CAL resp received");
+                        self.tcc_pump_cal.0 = cal.unwrap_or_default();
+                        self.tcc_pump_cal.1 = true;
+                    }
+                }
+            }
+            // All calibrations have been loaded out of DB, check validity
+            if self.hydr_cal.1 && self.mech_cal.1 && self.shift_map_cal.1 && self.tcc_pump_cal.1 {
+                if self.hydr_cal.0.is_valid() && self.mech_cal.0.is_valid() {
+                    defmt::error!("Calibrations ready and valid!");
+                    StoragePoll::Ready
+                } else {
+                    defmt::error!("Cannot load calibrations. Invalid data");
+                    StoragePoll::Error
+                }
+            } else {
+                StoragePoll::Waiting
+            }
+        } else {
+            StoragePoll::Waiting
+        }
+    }
+}
 
 impl GearboxCalibStorage for EgsCalStorage {
     fn hydr_cal(&self) -> &egs_logic::calbrations::hydr::HydrCal {
-        &HYDR_CAL
+        &self.hydr_cal.0
     }
 
     fn mech_cal(&self) -> &MechCal {
-        &MECH_CAL
+        &self.mech_cal.0
+    }
+
+    fn tcc_pump_cal(&self) -> &egs_logic::calbrations::tcc_pump::TccPumpCal {
+        todo!()
+    }
+
+    fn shift_map_cal(&self) -> &egs_logic::calbrations::shift::ShiftMapCal {
+        todo!()
     }
 }
 

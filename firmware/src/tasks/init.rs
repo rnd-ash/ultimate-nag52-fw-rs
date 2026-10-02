@@ -12,6 +12,7 @@ use crate::sensors::variable_adc_input::VariableAdcInput;
 use crate::solenoids::SolenoidController;
 use crate::solenoids::tcc_sol::TccSol;
 use crate::solenoids::tle8242::{TLE_SPI_BAUD, Tle8242, Tle8242Pins};
+use crate::storage::{QspiStorageCmd, QspiStorageResp};
 use crate::usb::UsbData;
 use crate::{
     CAN_ID_DIAG_RX, CAN_ID_DIAG_TX, DmacIrqs, Mono, Sercom2Irqs, Sercom6Irqs, app,
@@ -21,7 +22,6 @@ use crate::{
 use app::init::Context as InitContext;
 use app::{Resources, Shared};
 use atsamd_hal::can::Dependencies;
-use atsamd_hal::clock::v2::ahb::Ahb;
 use atsamd_hal::clock::v2::dfll::FromUsb;
 use atsamd_hal::clock::v2::dpll::Dpll;
 use atsamd_hal::clock::v2::gclk::{Gclk, GclkDiv8, GclkDiv16};
@@ -35,6 +35,7 @@ use atsamd_hal::fugit::{HertzU32, RateExtU32};
 use atsamd_hal::nvm::Nvm;
 use atsamd_hal::nvm::smart_eeprom::SmartEepromMode;
 use atsamd_hal::serial_number;
+use atsamd_hal::trng::Trng;
 use atsamd_hal::usb::UsbBus;
 use atsamd_hal::usb::usb_device::bus::UsbBusAllocator;
 use atsamd_hal::usb::usb_device::device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid};
@@ -53,6 +54,7 @@ use egs_logic::egs_can::{CanLayerTy, SignalFrame, slave_mode};
 use heapless::format;
 use mcan::embedded_can::{Id, StandardId};
 use rtic_sync::arbiter::Arbiter;
+use rtic_sync::make_channel;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 use mcan::filter::Filter as McanFilter;
@@ -472,18 +474,25 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
 
     let _dg: DiagEntry = new_diag_entry!(0x05, cx.local.inputs.clock_time_us);
 
+    let mut cal_storage = EgsCalStorage::default();
+    let (tx_qspi_cmd, rx_qspi_cmd) = make_channel!(QspiStorageCmd, 2);
+    let (tx_qspi_resp, rx_qspi_resp) = make_channel!(QspiStorageResp, 2);
+
+    cal_storage.set_channels(tx_qspi_cmd, rx_qspi_resp);
     let gearbox = V2Gearbox::new(
         cx.local.inputs,
         cx.local.vars,
         cx.local.outputs,
         EgsDtcStorage::default(),
-        EgsCalStorage::default(),
+        cal_storage,
         EgsMapStorage::default(),
         EgsAdpStorage::default(),
     );
 
     // Start HPET
-    app::async_init::spawn(dsu, qspi).unwrap_or_else(|_| panic!("Could not start async init"));
+
+    app::async_init::spawn(dsu, qspi, rx_qspi_cmd, tx_qspi_resp)
+        .unwrap_or_else(|_| panic!("Could not start async init"));
     app::perf_monitor::spawn(gclk0_100.freq().raw()).unwrap();
     app::sensor_query::spawn().unwrap();
     app::gearbox_task::spawn(arbiter_cantx, solenoid_io, eeprom)
@@ -505,6 +514,7 @@ pub fn init(cx: InitContext) -> (Shared, Resources) {
             gearbox,
             solenoid_statuses: Default::default(),
             qspi,
+            trng: Trng::new(&mut mclk, device.trng),
         },
         Resources {
             adc_data,

@@ -69,7 +69,7 @@ bitflags! {
 
 impl DeviceMode {
     pub fn has_error(&self) -> bool {
-        self.contains(
+        self.intersects(
             Self::TEMP_EMERGENCY
                 | Self::PERM_EMERGENCY
                 | Self::HARDWARE_ERR

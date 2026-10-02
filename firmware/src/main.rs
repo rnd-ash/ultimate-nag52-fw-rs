@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![forbid(clippy::unused_async)]
 
 use atsamd_hal::adc;
 use atsamd_hal::adc::Adc0;
@@ -116,13 +117,14 @@ mod app {
         diag::{KwpServer, PerfStatsTracker},
         sensors::{AdcData, SensorData, speed_sensors::AllSpeedSensors},
         solenoids::{SolenoidController, tcc_sol::TccSol},
-        storage::eeprom::Eeprom,
+        storage::{QspiStorageCmd, QspiStorageResp, eeprom::Eeprom},
         usb::UsbData,
     };
     use atsamd_hal::{
         clock::v2::{pclk, types::Can0},
         dmac::{self},
         fugit::ExtU64,
+        trng::Trng,
         usb::{UsbBus, usb_device::bus::UsbBusAllocator},
         watchdog::Watchdog,
     };
@@ -156,7 +158,11 @@ mod app {
         messageram::SharedMemory,
         rx_dedicated_buffers::DynRxDedicatedBuffer,
     };
-    use rtic_sync::{arbiter::Arbiter, signal::Signal};
+    use rtic_sync::{
+        arbiter::Arbiter,
+        channel::{Receiver, Sender},
+        signal::Signal,
+    };
     use usbd_serial::{DefaultBufferStore, SerialPort};
 
     #[local]
@@ -199,6 +205,7 @@ mod app {
         pub perf_stats: PerfStatsTracker,
         pub gearbox: V2Gearbox<'static>,
         pub solenoid_statuses: SolenoidReport,
+        pub trng: Trng,
     }
 
     #[init(local = [
@@ -226,11 +233,15 @@ mod app {
 
     #[task(priority = 1)]
     async fn async_init(
-        _ctx: async_init::Context,
+        mut ctx: async_init::Context,
         dsu: &'static Arbiter<Dsu>,
         qspi: &'static Arbiter<QspiStorage>,
+        rx_cmd: Receiver<'static, QspiStorageCmd, 2>,
+        tx_resp: Sender<'static, QspiStorageResp, 2>,
     ) {
         qspi.access().await.init_chip(&mut Mono).await;
+        // Start flash commander task
+        app::qspi_flash_commander::spawn(rx_cmd, tx_resp).unwrap();
         // Wait 5 seconds - Most likely a crash will happen whilst all the async tasks
         // are initializing
         Mono::delay(5000u64.millis()).await;
@@ -259,6 +270,15 @@ mod app {
     #[task(priority = 2, local=[adc_data], shared=[sensor_data])]
     async fn sensor_query(cx: sensor_query::Context) {
         tasks::sensor_query(cx).await;
+    }
+
+    #[task(priority = 2, shared=[&qspi, trng])]
+    async fn qspi_flash_commander(
+        cx: qspi_flash_commander::Context,
+        rx_cmd: Receiver<'static, QspiStorageCmd, 2>,
+        tx_resp: Sender<'static, QspiStorageResp, 2>,
+    ) {
+        tasks::qspi_commander_thread(cx, rx_cmd, tx_resp).await;
     }
 
     #[task(priority = 3,

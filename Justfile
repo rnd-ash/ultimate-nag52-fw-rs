@@ -22,7 +22,8 @@ run_fw *args:
 run_fw_probe *args:
     just build_cli_app
     cargo build --release
-    ./../target/release/flasher {{args}} flash --application ../target/thumbv7em-none-eabihf/release/firmware --compress -l
+    ./../target/release/flasher {{args}} flash --application ../target/thumbv7em-none-eabihf/release/firmware --compress
+    probe-rs attach --protocol swd ../target/thumbv7em-none-eabihf/release/firmware
 
 ident *args:
     just build_cli_app

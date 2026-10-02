@@ -2,8 +2,8 @@ use egs_maths::{declare_2d_map, maps::Map2d};
 
 use crate::{ShiftCircuit, calbrations::ShiftIndexedArray};
 
-#[derive(Copy, Clone)]
-#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[repr(align(4))]
 pub struct HydrCal {
     pub p_multi_1: u16,
     pub p_multi_other: u16,
@@ -35,9 +35,22 @@ pub struct HydrCal {
     pub pcs_map_z: [u16; 28],
 }
 
+const _: () = assert!(size_of::<HydrCal>() < 256);
+
 declare_2d_map!(PcsMap, 7, 4, u16, u16, u16);
 
 impl HydrCal {
+    pub fn is_valid(&self) -> bool {
+        self.p_multi_1 != 0
+            && self.p_multi_other != 0
+            && self.lp_reg_spring_pressure != 0
+            && self.shift_reg_spring_pressure != 0
+            && self.min_mpc_pressure != 0
+            && self.pcs_map_x.iter().find(|x| **x > 10_000).is_none()
+            && self.pcs_map_y.iter().find(|x| **x > 200).is_none()
+            && self.pcs_map_z.iter().find(|x| **x > 3_000).is_none()
+    }
+
     pub const fn pcs_map<'a>(&'a self) -> PcsMap<'a> {
         Map2d::new(&self.pcs_map_x, &self.pcs_map_y, &self.pcs_map_z)
     }

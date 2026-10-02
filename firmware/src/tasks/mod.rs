@@ -3,12 +3,14 @@ mod gearbox;
 mod init;
 mod performance_monitor;
 mod sensors;
+mod qspi_commander;
 
 pub use diag::*;
 pub use gearbox::*;
 pub use init::*;
 pub use performance_monitor::*;
 pub use sensors::*;
+pub use qspi_commander::*;
 
 use core::ptr::addr_of;
 

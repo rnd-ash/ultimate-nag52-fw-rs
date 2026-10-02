@@ -1,9 +1,17 @@
-use core::ops::Index;
+//! Calibrations
+//! 
+//! These calibrations are copied from EGS52/53 flash files.
+//! therefore, their structures are rigid, and cannot change,
+//! and also have to be aligned to C standards, so that 
+//! a copied calibration works correctly
 
+use core::ops::Index;
 use crate::{Clutch, Gear, ShiftCircuit};
 
 pub mod hydr;
 pub mod mech;
+pub mod tcc_pump;
+pub mod shift;
 
 pub const SHIFT_ARRAY_LEN: usize = 8;
 pub const GEAR_ARRAY_LEN: usize = 8;

@@ -1,10 +1,19 @@
 use bitflags::bitflags;
 
-use crate::calbrations::{hydr::HydrCal, mech::MechCal};
+use crate::calbrations::{hydr::HydrCal, mech::MechCal, shift::ShiftMapCal, tcc_pump::TccPumpCal};
 
+#[derive(Copy, Clone)]
+/// Storage database poll result
 pub enum StoragePoll {
+    /// Storage is waiting for something (Not ready)
     Waiting,
+    /// Ready - Guarantees that the data loaded
+    /// is valid, and will NOT change for the duration
+    /// of the current drive cycle
     Ready,
+    /// Error - Data loaded is invalid or couldn't be
+    /// loaded. This puts EGS into emergency mode
+    /// and disables running completely.
     Error,
 }
 
@@ -19,6 +28,8 @@ pub trait GearboxMapStorage: StorageBacking {}
 pub trait GearboxCalibStorage: StorageBacking {
     fn hydr_cal(&self) -> &HydrCal;
     fn mech_cal(&self) -> &MechCal;
+    fn tcc_pump_cal(&self) -> &TccPumpCal;
+    fn shift_map_cal(&self) -> &ShiftMapCal;
 }
 
 pub trait GearboxAdaptStorage: StorageBacking {}
@@ -26,10 +37,10 @@ pub trait GearboxAdaptStorage: StorageBacking {}
 #[repr(C)]
 pub enum EgsCanLayerTy {
     Egs51 = 1,
-    EGs52 = 2,
-    EGs53 = 3,
+    Egs52 = 2,
+    Egs53 = 3,
     Custom = 0xF0,
-    NotDefined = 0xFF
+    NotDefined = 0xFF,
 }
 
 bitflags! {

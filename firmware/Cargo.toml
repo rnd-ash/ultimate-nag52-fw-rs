@@ -43,6 +43,8 @@ pastey = "0.2.3"
 embedded-alloc = "0.7.0"
 derived = "0.4.2"
 bbqueue = "0.7.0"
+ekv = "1.0.0"
+embassy-sync = "=0.6.2"
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["now"] }
